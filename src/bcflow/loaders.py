@@ -32,13 +32,16 @@ def load_ref_points(ref_cfg, qa: list[QACheck], var_units: str = "") -> xr.DataA
                 continue
             df = pd.read_csv(f, parse_dates=["time"])
             series[key] = df.set_index("time")["value"]
+
         if missing:
-            qa.append(QACheck(
-                name="ref_points:long:missing_files",
-                status="warn",
-                message=f"{len(missing)} trạm có trong metadata nhưng không có file dữ liệu, sẽ bị bỏ qua.",
-                context={"missing_stations": sorted(missing)},
-            ))
+            qa.append(
+                QACheck(
+                    name="ref_points:long:missing_files",
+                    status="warn",
+                    message=f"{len(missing)} trạm có trong metadata nhưng không có file dữ liệu, sẽ bị bỏ qua.",
+                    context={"missing_stations": sorted(missing)},
+                )
+            )
         wide = pd.DataFrame(series)
 
     elif ref_cfg.station_layout == "wide":
@@ -46,31 +49,39 @@ def load_ref_points(ref_cfg, qa: list[QACheck], var_units: str = "") -> xr.DataA
         matched = [c for c in meta.index if c in raw.columns]
         missing = sorted(set(meta.index) - set(raw.columns))
         if missing:
-            qa.append(QACheck(
-                name="ref_points:wide:missing_columns",
-                status="warn",
-                message=f"{len(missing)} trạm có trong metadata nhưng không có cột dữ liệu, sẽ bị bỏ qua.",
-                context={"missing_stations": missing},
-            ))
+            qa.append(
+                QACheck(
+                    name="ref_points:wide:missing_columns",
+                    status="warn",
+                    message=f"{len(missing)} trạm có trong metadata nhưng không có cột dữ liệu, sẽ bị bỏ qua.",
+                    context={"missing_stations": missing},
+                )
+            )
         wide = raw[matched]
 
     else:  # không thể xảy ra nếu đi qua pydantic, giữ lại cho an toàn khi gọi trực tiếp
-        raise ValueError(f"Invalid station_layout: {ref_cfg.station_layout!r}. Valid layouts: ['long', 'wide'].")
+        raise ValueError(
+            f"Invalid station_layout: {ref_cfg.station_layout!r}. Valid layouts: ['long', 'wide']."
+        )
 
     if wide.empty:
-        qa.append(QACheck(
-            name="ref_points:no_match",
-            status="fail",
-            message="No station matched between metadata and data -- check match_key.",
-        ))
+        qa.append(
+            QACheck(
+                name="ref_points:no_match",
+                status="fail",
+                message="No station matched between metadata and data -- check match_key.",
+            )
+        )
         raise ValueError("No station matched -- see QACheck 'ref_points:no_match'.")
 
-    qa.append(QACheck(
-        name="ref_points:loaded",
-        status="pass",
-        message=f"Đã nạp {len(wide.columns)} trạm (layout={ref_cfg.station_layout}).",
-        context={"n_stations": len(wide.columns), "stations": sorted(wide.columns)},
-    ))
+    qa.append(
+        QACheck(
+            name="ref_points:loaded",
+            status="pass",
+            message=f"Đã nạp {len(wide.columns)} trạm (layout={ref_cfg.station_layout}).",
+            context={"n_stations": len(wide.columns), "stations": sorted(wide.columns)},
+        )
+    )
 
     stations = wide.columns
     return xr.DataArray(
@@ -91,13 +102,16 @@ def _open_raw(raster_cfg) -> xr.Dataset | xr.DataArray:
         return xr.open_zarr(raster_cfg.path)
     if raster_cfg.format == "netcdf":
         return xr.open_dataset(raster_cfg.path)
-    raise ValueError(f"Unsupported raster format: {raster_cfg.format!r}. Valid formats: ['netcdf', 'zarr'].")
+    raise ValueError(
+        f"Unsupported raster format: {raster_cfg.format!r}. Valid formats: ['netcdf', 'zarr']."
+    )
 
 
 def load_raster_variable(raster_cfg, var_name: str) -> xr.DataArray:
     """Mở 1 nguồn raster (NetCDF/Zarr) và trả về đúng 1 biến dưới dạng DataArray."""
     src = _open_raw(raster_cfg)
     return src[var_name] if isinstance(src, xr.Dataset) else src
+
 
 def load_variable_sources(var_cfg, qa: list[QACheck]):
     """Load every raw input one variable needs for bias correction.

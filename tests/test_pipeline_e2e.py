@@ -26,7 +26,7 @@ def test_tasmax_adjustment_moves_mean_toward_ref(toy_config):
     cfg = load_config(toy_config)
     qa = []
     ref = load_ref_points(cfg.variables[0].data.ref, qa, "degC")
-    scen, _adj = run_variable(cfg.variables[0], qa)
+    scen = run_variable(cfg.variables[0], qa)["scen"]
 
     ref_mean = ref.mean("time").values
     scen_mean = scen.mean("time").values
@@ -48,7 +48,7 @@ def test_pr_adapt_freq_reduces_dry_day_mismatch(toy_config):
     sim_raw = load_raster_variable(cfg.variables[1].data.sim, "pr")
     sim_raw_at_points = extract_nearest(sim_raw, ref, cfg.variables[1].data.sim, qa, source_label="pr:sim_raw")
 
-    scen, _adj = run_variable(cfg.variables[1], qa)
+    scen = run_variable(cfg.variables[1], qa)["scen"]
 
     wet_months = slice("2010-08-01", "2010-09-30")
     # Reduce by dimension NAME, never by axis position: dim order is not part

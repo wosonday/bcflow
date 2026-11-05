@@ -27,24 +27,30 @@ def test_output_formats_in_schema_match_registered_writers():
 
 def test_write_run_writes_every_variable_qa_and_manifest(toy_config, tmp_path):
     out = run_pipeline(toy_config)
-    manifest_path = write_run(out, OutputConfig(path=str(tmp_path), formats=["netcdf", "csv"]))
+    manifest_path = write_run(out, OutputConfig(path=str(tmp_path), formats=["netcdf", "csv"]), config=toy_config)
     run_dir = manifest_path.parent
 
     manifest = _read_json(manifest_path)
-    assert {name: v["status"] for name, v in manifest.items()} == {"tasmax": "ok", "pr": "ok"}
+    assert manifest["schema_version"] == 1 and manifest["qa"] == "qa.json" and manifest["config"] == "config.json"
+    variables = manifest["variables"]
+    assert {name: v["status"] for name, v in variables.items()} == {"tasmax": "ok", "pr": "ok"}
     # Relative paths: the run folder stays valid when moved or shared.
-    assert manifest["tasmax"]["scen"] == {"netcdf": "tasmax/scen.nc", "csv": "tasmax/scen.csv"}
-    assert manifest["pr"]["adj"] == "pr/adj.nc"
+    assert variables["tasmax"]["scen"] == {"netcdf": "tasmax/scen.nc", "csv": "tasmax/scen.csv"}
+    assert variables["pr"]["adj"] == "pr/adj.nc"
+    assert variables["pr"]["evaluation"] == "pr/evaluation.csv"
 
     with xr.open_dataset(run_dir / "tasmax" / "scen.nc") as ds:
         assert "tasmax" in ds.data_vars
         assert ds.sizes["station"] == out["results"]["tasmax"]["scen"].sizes["station"]
-    assert (run_dir / "pr" / "adj.nc").is_file()
 
     csv = pd.read_csv(run_dir / "pr" / "scen.csv", index_col="time")
     assert len(csv) == out["results"]["pr"]["scen"].sizes["time"]
 
+    evaluation = pd.read_csv(run_dir / "pr" / "evaluation.csv")
+    assert {"station", "metric", "raw", "corrected", "improved"} <= set(evaluation.columns)
+
     assert len(_read_json(run_dir / "qa.json")) == len(out["qa"])
+    assert _read_json(run_dir / "config.json") == toy_config
 
 
 def test_failed_variable_is_listed_in_manifest_and_others_still_written(toy_config, tmp_path):
@@ -53,10 +59,10 @@ def test_failed_variable_is_listed_in_manifest_and_others_still_written(toy_conf
     out = run_pipeline(bad)
 
     manifest_path = write_run(out, OutputConfig(path=str(tmp_path)))
-    manifest = _read_json(manifest_path)
+    variables = _read_json(manifest_path)["variables"]
 
-    assert manifest["tasmax"] == {"status": "failed"}
-    assert manifest["pr"]["status"] == "ok"
+    assert variables["tasmax"] == {"status": "failed"}
+    assert variables["pr"]["status"] == "ok"
     assert not (manifest_path.parent / "tasmax").exists()
     assert (manifest_path.parent / "pr" / "scen.nc").is_file()
 
@@ -68,10 +74,10 @@ def test_write_failure_is_isolated_and_reported_in_qa(toy_config, tmp_path):
     out["results"]["tasmax"]["scen"] = out["results"]["tasmax"]["scen"].expand_dims(extra=[0])
 
     manifest_path = write_run(out, OutputConfig(path=str(tmp_path), formats=["csv"]))
-    manifest = _read_json(manifest_path)
+    variables = _read_json(manifest_path)["variables"]
 
-    assert manifest["tasmax"] == {"status": "failed"}
-    assert manifest["pr"]["status"] == "ok"
+    assert variables["tasmax"] == {"status": "failed"}
+    assert variables["pr"]["status"] == "ok"
     assert any(c.name == "writers:tasmax:exception" and c.status == "fail" for c in out["qa"])
 
 
@@ -92,18 +98,17 @@ def test_cli_writes_outputs_relative_to_config_file(toy_config, tmp_path):
         encoding="utf-8",
     )
 
-    assert main([str(config_file)]) == 0
+    assert main(["run", str(config_file)]) == 0
 
     run_dirs = list((tmp_path / "results").iterdir())  # ../results from configs/, not the cwd
     assert len(run_dirs) == 1
-    assert _read_json(run_dirs[0] / "manifest.json")["tasmax"]["status"] == "ok"
+    assert _read_json(run_dirs[0] / "manifest.json")["variables"]["tasmax"]["status"] == "ok"
 
 
 def test_cli_rejects_invalid_output_section_before_running(toy_config, tmp_path, capsys):
     config_file = tmp_path / "run.yaml"
-    config_file.write_text(
-        yaml.safe_dump({**toy_config, "output": {"formats": ["excel"]}}), encoding="utf-8"
-    )
+    config_file.write_text(yaml.safe_dump({**toy_config, "output": {"formats": ["excel"]}}), encoding="utf-8")
 
-    assert main([str(config_file)]) == 2
+    assert main(["run", str(config_file)]) == 2
     assert "formats" in capsys.readouterr().err
+    assert not (tmp_path / "outputs").exists()

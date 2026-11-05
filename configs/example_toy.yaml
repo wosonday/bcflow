@@ -1,7 +1,7 @@
 # Config mẫu — khớp với dữ liệu sinh bởi scripts/make_toy_data.py vào data/.
 # Đường dẫn tính từ thư mục chứa file này (configs/), nên dùng ../data/.
 # Chạy: uv run python scripts/make_toy_data.py   (sinh dữ liệu trước)
-#       uv run bcflow configs/example_toy.yaml
+#       uv run bcflow run configs/example_toy.yaml
 
 output:
   path: ../outputs        # relative to this file -> <project>/outputs (git-ignored)
@@ -22,6 +22,9 @@ variables:
     adjust_params:
       interp: linear
       extrapolation: constant
+    periods:
+      calibration: ["2000", "2012"]   # years used to train the correction
+      validation: ["2013", "2020"]    # held-out years for the before/after check
     data:
       ref:
         station_layout: wide
@@ -51,6 +54,9 @@ variables:
     adjust_params:
       interp: linear
       extrapolation: constant
+    periods:
+      calibration: ["2000", "2012"]   # years used to train the correction
+      validation: ["2013", "2020"]    # held-out years for the before/after check
     data:
       ref:
         station_layout: long

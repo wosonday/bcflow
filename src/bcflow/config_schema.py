@@ -13,9 +13,25 @@ sending it to the backend).
 
 from __future__ import annotations
 
-from typing import Literal
+from datetime import date, datetime
+from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, Field, model_validator
+import pandas as pd
+from pydantic import BaseModel, BeforeValidator, Field, model_validator
+
+
+def _as_date_text(value: Any) -> Any:
+    """YAML reads an unquoted 2000 as an int and 2000-01-01 as a date; accept
+    both as text, so non-coders do not have to know when to quote."""
+    if isinstance(value, (date, datetime)):
+        return value.isoformat()
+    if isinstance(value, int) and not isinstance(value, bool):
+        return str(value)
+    return value
+
+
+# An ISO date or a prefix of one: "2000", "2000-06", "2000-06-15".
+DateText = Annotated[str, BeforeValidator(_as_date_text)]
 
 
 class GroupConfig(BaseModel):
@@ -41,8 +57,8 @@ class RasterSourceConfig(BaseModel):
 
 
 class HistSimSourceConfig(RasterSourceConfig):
-    hist_period: tuple[str, str]
-    sim_period: tuple[str, str]
+    hist_period: tuple[DateText, DateText]
+    sim_period: tuple[DateText, DateText]
 
 
 class VariableDataConfig(BaseModel):
@@ -68,6 +84,43 @@ class VariableDataConfig(BaseModel):
         return self
 
 
+def _span(period: tuple[str, str], field: str) -> tuple[pd.Timestamp, pd.Timestamp]:
+    """First and last instant covered: ("2000", "2014") -> 2000-01-01 .. 2014-12-31."""
+    try:
+        start, end = pd.Period(period[0]).start_time, pd.Period(period[1]).end_time
+    except ValueError:
+        raise ValueError(f"periods.{field}: invalid date in {list(period)}; use e.g. '2000' or '2000-01-31'.") from None
+    if start > end:
+        raise ValueError(f"periods.{field}: start {period[0]!r} is after end {period[1]!r}.")
+    return start, end
+
+
+class PeriodsConfig(BaseModel):
+    """Which years train the correction and which ones check it.
+
+    calibration: data used to TRAIN (ref and hist). Default: all common data.
+    validation:  held-out data used only to EVALUATE before/after; must not
+                 overlap calibration. Without it, evaluation is in-sample.
+    """
+
+    calibration: tuple[DateText, DateText] | None = None
+    validation: tuple[DateText, DateText] | None = None
+
+    @model_validator(mode="after")
+    def _ordered_and_disjoint(self) -> "PeriodsConfig":
+        if self.validation is not None and self.calibration is None:
+            raise ValueError(
+                "periods: validation requires calibration -- otherwise training would use "
+                "the validation years too and the check would not be independent."
+            )
+        spans = {f: _span(getattr(self, f), f) for f in ("calibration", "validation") if getattr(self, f)}
+        if len(spans) == 2:
+            (c0, c1), (v0, v1) = spans["calibration"], spans["validation"]
+            if c0 <= v1 and v0 <= c1:
+                raise ValueError("periods: calibration and validation overlap; validation must use other years.")
+        return self
+
+
 class VariableConfig(BaseModel):
     name: str
     method: str
@@ -78,6 +131,7 @@ class VariableConfig(BaseModel):
     group: GroupConfig = Field(default_factory=GroupConfig)
     train_params: dict = Field(default_factory=dict)
     adjust_params: dict = Field(default_factory=dict)
+    periods: PeriodsConfig = Field(default_factory=PeriodsConfig)
     data: VariableDataConfig
 
     @model_validator(mode="after")

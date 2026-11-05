@@ -1,21 +1,23 @@
-"""Xây dựng Grouper của xsdba từ config, và tự nhận diện tên chiều lat/lon.
+"""Build the xsdba Grouper from config, and auto-detect lat/lon dimension names.
 
-Mẫu alias dict (thay vì dò danh sách ứng viên) port từ
+The alias-dict pattern (instead of scanning a candidate list) is ported from
 `swatprep/core/weather.py::station_column()` (repo wosonday/swat-preprocessing):
-mọi tên cột/chiều được chuẩn hoá về MỘT tên chính tắc qua bảng ánh xạ cố định,
-tránh tình huống "mơ hồ" giả khi dataset có cả tên gốc lẫn alias của nó
-(vd. có cả 'lat' và 'latitude' cùng lúc không phải là xung đột).
+every column/dimension name is normalised to ONE canonical name through a
+fixed mapping, which avoids false ambiguity when a dataset carries both an
+original name and its alias (having both 'lat' and 'latitude' is not a conflict).
 """
 
 from __future__ import annotations
+
+from typing import Any, Hashable
 
 import xarray as xr
 from xsdba.base import Grouper
 
 from .qa import QACheck
 
-# Alias cho tên chiều không gian — mở rộng danh sách này khi gặp quy ước mới,
-# không thêm nhánh if/elif.
+# Aliases for spatial dimension names -- extend this mapping for a new
+# convention instead of adding if/elif branches.
 _LATLON_ALIASES = {
     "latitude": "lat",
     "nav_lat": "lat",
@@ -42,12 +44,12 @@ def build_grouper(var_cfg) -> str | Grouper:
 
 def resolve_latlon_dims(
     da: xr.DataArray, grid_cfg, qa: list[QACheck], *, source_label: str = ""
-) -> tuple[str, str]:
-    """Return (lat_dim, lon_dim) exist in da.
+) -> tuple[Hashable | Any, Hashable | Any]:
+    """Return the (lat_dim, lon_dim) names that exist in da.
 
-    Absolute priority: lat_dim/lon_dim declare explicitly in config.
-    If not declared: chuẩn hoá mọi dim/coord hiện có qua alias dict,
-    tìm tên chính tắc 'lat'/'lon'. Không khai báo + không dò được -> fail rõ ràng.
+    Absolute priority: lat_dim/lon_dim declared explicitly in config.
+    Otherwise every existing dim/coord is normalised through the alias dict
+    to find the canonical 'lat'/'lon'. Not declared and not found -> clear fail.
     """
     tag = f" ({source_label})" if source_label else ""
     available = set(da.coords) | set(da.dims)
@@ -84,7 +86,7 @@ def resolve_latlon_dims(
         qa.append(QACheck(
             name=f"grouping:latlon_auto_detected{tag}",
             status="pass",
-            message=f"Tự động nhận diện chiều không gian{tag}: {', '.join(auto_used)}.",
+            message=f"Auto-detected spatial dimensions{tag}: {', '.join(auto_used)}.",
         ))
 
     return lat_dim, lon_dim

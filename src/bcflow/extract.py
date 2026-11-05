@@ -13,15 +13,16 @@ from .qa import QACheck
 def extract_nearest_regular_latlon(
     da: xr.DataArray, ref_points: xr.DataArray, *, lat_dim: str, lon_dim: str
 ) -> xr.DataArray:
-    """Trích giá trị tại ô lưới gần nhất cho từng trạm trong ref_points.
+    """Value of the grid cell nearest to each station in ref_points.
 
-    Vectorized theo chiều 'station': ref_points['lat']/['lon'] cùng mang
-    chiều 'station', nên kết quả trả về cũng có chiều 'station' (khớp 1-1
-    với ref) thay vì (lat, lon) như raster gốc.
+    Vectorised along 'station': ref_points['lat']/['lon'] both carry the
+    'station' dimension, so the result has a 'station' dimension too
+    (matching ref one-to-one) instead of the raster's (lat, lon).
     """
     out = da.sel({lat_dim: ref_points["lat"], lon_dim: ref_points["lon"]}, method="nearest")
-    # Bỏ toạ độ lat/lon của Ô LƯỚI (khác giá trị thật của trạm trong ref) để
-    # tránh xung đột toạ độ khi xsdba gộp ref/hist/sim theo chiều 'station'.
+    # Drop the GRID CELL's lat/lon (they differ from the station's true
+    # coordinates in ref) to avoid coordinate conflicts when xsdba aligns
+    # ref/hist/sim along 'station'.
     return out.drop_vars([lat_dim, lon_dim], errors="ignore")
 
 
@@ -59,7 +60,7 @@ def extract_nearest_rotated_pole(
             f"(curvilinear grid); got {lat2d.ndim}-D. For a regular 1-D "
             "lat/lon grid, use grid_type='regular_latlon'."
         )
-    native_dims = lat2d.dims  # vd. ("rlat", "rlon")
+    native_dims = lat2d.dims  # e.g. ("rlat", "rlon")
 
     tree = cKDTree(_latlon_to_unit_sphere(lat2d.values.ravel(), lon2d.values.ravel()))
     station_xyz = _latlon_to_unit_sphere(ref_points["lat"].values, ref_points["lon"].values)

@@ -1,11 +1,10 @@
-"""QA primitives dùng xuyên suốt pipeline bias-correction.
+"""QA primitives used throughout the bias-correction pipeline.
 
-Ý tưởng cốt lõi (port từ thiết kế của swatprep/qa.py): thay vì raise/
-warnings.warn() rải rác, mỗi bước xử lý append một QACheck vào một list
-dùng chung, truyền xuyên suốt pipeline. Kết quả cuối cùng mang theo list
-QACheck này để frontend render thành bảng pass/warn/fail — không có cảnh
-báo nào "biến mất" vào stderr, điều mà warnings.warn() không đảm bảo được
-trong một backend phục vụ web UI.
+Core idea (ported from swatprep/qa.py): instead of scattered raise/
+warnings.warn() calls, every processing step appends a QACheck to one shared
+list passed through the pipeline. The final result carries that list, so a
+frontend can render it as a pass/warn/fail table -- no warning "disappears"
+into stderr, which warnings.warn() cannot guarantee behind a user interface.
 """
 
 from __future__ import annotations
@@ -26,7 +25,7 @@ class QACheck:
     context: dict[str, Any] = field(default_factory=dict)
 
     def is_ok(self) -> bool:
-        """return `True` if not fail."""
+        """True unless the status is 'fail'."""
         return self.status in ("pass", "warn")
 
     def as_dict(self) -> dict[str, Any]:
@@ -39,15 +38,15 @@ class QACheck:
 
 
 def failures(checks: list[QACheck]) -> list[QACheck]:
-    """Chỉ trả về các check có status 'fail'."""
+    """Only the checks with status 'fail'."""
     return [c for c in checks if c.status == "fail"]
 
 
 def warnings_only(checks: list[QACheck]) -> list[QACheck]:
-    """Chỉ trả về các check có status 'warn'."""
+    """Only the checks with status 'warn'."""
     return [c for c in checks if c.status == "warn"]
 
 
 def all_pass(checks: list[QACheck]) -> bool:
-    """True nếu không có check nào 'fail'."""
+    """True if no check has status 'fail'."""
     return not failures(checks)
