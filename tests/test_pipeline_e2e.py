@@ -51,13 +51,15 @@ def test_pr_adapt_freq_reduces_dry_day_mismatch(toy_config):
     scen, _adj = run_variable(cfg.variables[1], qa)
 
     wet_months = slice("2010-08-01", "2010-09-30")
-    dry_ref = (ref.sel(time=wet_months).values == 0).mean(axis=0)
-    dry_sim = (sim_raw_at_points.sel(time=wet_months).values == 0).mean(axis=0)
-    dry_scen = (scen.sel(time=wet_months).values == 0).mean(axis=0)
+    # Reduce by dimension NAME, never by axis position: dim order is not part
+    # of the contract (xsdba's order once varied between runs).
+    dry_ref = (ref.sel(time=wet_months) == 0).mean("time")
+    dry_sim = (sim_raw_at_points.sel(time=wet_months) == 0).mean("time")
+    dry_scen = (scen.sel(time=wet_months) == 0).mean("time")
 
     # Khoảng cách tỷ lệ ngày khô giữa scen và ref phải không lớn hơn khoảng cách
     # giữa sim gốc (chưa hiệu chỉnh) và ref, trung bình trên các trạm.
-    assert np.mean(np.abs(dry_scen - dry_ref)) <= np.mean(np.abs(dry_sim - dry_ref)) + 1e-9
+    assert float(abs(dry_scen - dry_ref).mean()) <= float(abs(dry_sim - dry_ref).mean()) + 1e-9
 
 
 def test_one_bad_variable_does_not_break_the_others(toy_config):

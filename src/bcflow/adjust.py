@@ -58,6 +58,9 @@ def run_variable(var_cfg: VariableConfig, qa: list[QACheck]):
 
     adj = AdjClass.train(ref, hist, **train_kwargs)
     scen = adj.adjust(sim, **var_cfg.adjust_params)
+    # xsdba's output dim order depends on Python's per-process string hashing
+    # (it builds dims from a set), so fix it: identical files on every run.
+    scen = scen.transpose("time", ...)
 
     qa.append(QACheck(
         name=f"train_adjust:{name}:done",

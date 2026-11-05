@@ -42,7 +42,7 @@ def run_pipeline(config: PipelineConfig | dict) -> dict:
     results: dict[str, dict | None] = {}
 
     for raw in raw_variables:
-        name = raw.name if isinstance(raw, VariableConfig) else raw.get("name", "<không rõ tên>")
+        name = raw.name if isinstance(raw, VariableConfig) else raw.get("name", "<unnamed>")
         try:
             var_cfg = raw if isinstance(raw, VariableConfig) else VariableConfig.model_validate(raw)
             scen, adj = run_variable(var_cfg, qa)

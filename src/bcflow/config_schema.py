@@ -90,8 +90,27 @@ class VariableConfig(BaseModel):
         return self
 
 
+# Must list the same formats as writers._WRITERS (guarded by a test in
+# test_writers.py); kept as a Literal here so this module stays free of
+# xarray and can still validate a frontend form on its own.
+OutputFormat = Literal["netcdf", "csv"]
+
+
+class OutputConfig(BaseModel):
+    """Where and how to write a run's results.
+
+    `path` is resolved relative to the config file's directory when declared
+    in config.yaml (config_loader treats every 'path' key that way). The
+    default "outputs" is used as-is, i.e. relative to the current directory.
+    """
+
+    path: str = "outputs"
+    formats: list[OutputFormat] = Field(default_factory=lambda: ["netcdf"], min_length=1)
+
+
 class PipelineConfig(BaseModel):
     variables: list[VariableConfig] = Field(min_length=1)
+    output: OutputConfig = Field(default_factory=OutputConfig)
 
 
 def load_config(raw: dict) -> PipelineConfig:

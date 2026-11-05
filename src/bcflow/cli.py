@@ -1,5 +1,11 @@
 """
-CLI: `bcflow <config.yaml>` — run pipeline, print QA report.
+CLI: `bcflow <config.yaml>` — run pipeline, write results, print QA report.
+
+Exit codes:
+    0  every variable computed and written
+    1  the run finished, but at least one QACheck failed
+    2  whole-run error: config file unreadable/invalid YAML, invalid 'output'
+       section, or the output folder cannot be created
 """
 
 from __future__ import annotations
@@ -9,7 +15,9 @@ import sys
 from pathlib import Path
 
 from .config_loader import load_config_file
+from .config_schema import OutputConfig
 from .pipeline import run_pipeline
+from .writers import write_run
 
 _ICON = {"pass": "[PASS]", "warn": "[WARN]", "fail": "[FAIL]"}
 
@@ -43,12 +51,27 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         raw_config = load_config_file(args.config)
+        # Validated here, not per variable inside run_pipeline(): a bad 'output'
+        # section is a whole-run error (no single variable is at fault), so it
+        # stops the run before any variable is computed. pydantic's
+        # ValidationError subclasses ValueError, so this clause catches it too.
+        output_cfg = OutputConfig.model_validate(raw_config.get("output") or {})
     except ValueError as exc:
         print(f"[FAIL] {exc}", file=sys.stderr)
-        return 2  # error of file config (cannot read/cannot be parsed as YAML) -- different error code from "pipeline ran but has failures"
+        return 2
 
     out = run_pipeline(raw_config)
-    return _print_report(out)
+
+    try:
+        manifest_path = write_run(out, output_cfg)  # before the report, so write failures appear in it
+    except OSError as exc:  # e.g. output folder not writable
+        _print_report(out)
+        print(f"[FAIL] Cannot create the output folder: {exc}", file=sys.stderr)
+        return 2
+
+    code = _print_report(out)
+    print(f"Outputs written to: {manifest_path.parent}")
+    return code
 
 
 if __name__ == "__main__":

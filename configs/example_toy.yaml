@@ -3,6 +3,10 @@
 # Chạy: uv run python scripts/make_toy_data.py   (sinh dữ liệu trước)
 #       uv run bcflow configs/example_toy.yaml
 
+output:
+  path: ../outputs        # relative to this file -> <project>/outputs (git-ignored)
+  formats: [netcdf, csv]
+
 variables:
   - name: tasmax
     method: empirical_quantile_mapping
