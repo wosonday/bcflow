@@ -1,0 +1,32 @@
+[project]
+name = "bcflow"
+version = "0.1.0"
+description = "Pipeline bias-correction dựa trên xsdba, điều khiển qua config.yaml"
+readme = "README.md"
+authors = [
+    { name = "wosonday", email = "thanhsonmttn@gmail.com" }
+]
+requires-python = ">=3.14"
+dependencies = [
+    "xsdba>=0.7.0",
+    "xarray>=2026.1.0",
+    "pandas>=2.2",
+    "pyyaml>=6.0",
+    "pydantic>=2.9",
+    "netCDF4>=1.7",
+    "zarr>=3.0",
+    "h5netcdf>=1.3",
+    "scipy>=1.11",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+]
+
+[project.scripts]
+bcflow = "bcflow.cli:main"
+
+[build-system]
+requires = ["uv_build>=0.13.5,<0.14.0"]
+build-backend = "uv_build"

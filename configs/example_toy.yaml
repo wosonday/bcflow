@@ -1,0 +1,63 @@
+# Config mẫu — khớp với dữ liệu sinh bởi scripts/make_toy_data.py vào data/.
+# Đường dẫn tính từ thư mục chứa file này (configs/), nên dùng ../data/.
+# Chạy: uv run python scripts/make_toy_data.py   (sinh dữ liệu trước)
+#       uv run bcflow configs/example_toy.yaml
+
+variables:
+  - name: tasmax
+    method: empirical_quantile_mapping
+    kind: "+"
+    units: degC
+    adapt_freq: false
+    group:
+      dim: time
+      prop: dayofyear
+      window: 15
+    train_params:
+      nquantiles: 15
+    adjust_params:
+      interp: linear
+      extrapolation: constant
+    data:
+      ref:
+        station_layout: wide
+        match_key: name
+        metadata_path: ../data/tasmax_stations_meta.csv
+        path: ../data/tasmax_ref_wide.csv
+      hist:
+        format: netcdf
+        path: ../data/tasmax_hist.nc
+        grid_type: regular_latlon
+      sim:
+        format: netcdf
+        path: ../data/tasmax_sim.nc
+        grid_type: regular_latlon
+
+  - name: pr
+    method: empirical_quantile_mapping
+    kind: "*"
+    units: mm/day
+    adapt_freq: true
+    adapt_freq_thresh: "0.5 mm d-1"
+    group:
+      dim: time
+      window: 1
+    train_params:
+      nquantiles: 15
+    adjust_params:
+      interp: linear
+      extrapolation: constant
+    data:
+      ref:
+        station_layout: long
+        match_key: name
+        metadata_path: ../data/pr_stations_meta.csv
+        path: ../data/pr_ref_long
+      hist:
+        format: netcdf
+        path: ../data/pr_hist.nc
+        grid_type: regular_latlon
+      sim:
+        format: netcdf
+        path: ../data/pr_sim.nc
+        grid_type: regular_latlon
