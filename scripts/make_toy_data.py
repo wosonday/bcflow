@@ -29,7 +29,7 @@ def generate_toy_dataset(root: Path, seed: int = 42, n_years: int = 21) -> dict[
 
     time = pd.date_range("2000-01-01", periods=365 * n_years, freq="D")
     n = len(time)
-    doy = time.dayofyear.values
+    doy = time.day_of_year.values
 
     paths: dict[str, Path] = {}
 

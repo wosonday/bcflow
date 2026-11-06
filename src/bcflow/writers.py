@@ -14,7 +14,11 @@ write_run() is the single entry point. On-disk layout of one run:
         <var>/adj.nc         trained adjustment factors, always NetCDF, so they
                              can be re-applied to another sim without
                              re-training (xsdba allows adj.adjust() repeatedly)
-        <var>/evaluation.csv before/after metrics per station (evaluate.py)
+        <var>/evaluation.csv before/after metrics per period and station (evaluate.py)
+        <var>/hist_eval.nc   obs, raw hist and CORRECTED hist on the same dates,
+                             over the calibration and validation periods, with a
+                             'period' label per day (+ hist_eval.csv, long format:
+                             time, station, period, obs, raw, corrected)
 
 qa.json is written once per run, not per variable: run_pipeline() collects
 the checks of every variable into ONE shared list, so a per-variable copy
@@ -24,7 +28,8 @@ manifest.json (schema_version 1), all paths relative to the run folder:
     {"schema_version": 1, "bcflow_version": "0.1.0", "created": "<ISO 8601>",
      "qa": "qa.json", "config": "config.json" | null,
      "variables": {"<var>": {"status": "ok", "scen": {"netcdf": "<var>/scen.nc"},
-                             "adj": "<var>/adj.nc", "evaluation": "<var>/evaluation.csv" | null}
+                             "adj": "<var>/adj.nc", "evaluation": "<var>/evaluation.csv" | null,
+                             "hist_eval": {"netcdf": "<var>/hist_eval.nc"} | null}
                    | {"status": "failed"}}}
 """
 
@@ -45,7 +50,9 @@ MANIFEST_SCHEMA_VERSION = 1
 _EXTENSIONS = {"netcdf": "nc", "csv": "csv"}
 
 
-def _write_netcdf(obj: xr.DataArray | xr.Dataset, path: Path, *, var_name: str | None = None) -> Path:
+def _write_netcdf(
+    obj: xr.DataArray | xr.Dataset, path: Path, *, var_name: str | None = None
+) -> Path:
     """NetCDF keeps attrs/units/multiple dimensions intact -- the "canonical" format.
 
     A DataArray with no name yet (the `scen` case) must be wrapped into a
@@ -77,6 +84,23 @@ _WRITERS = {
 }
 
 
+def _write_hist_eval(
+    ds: xr.Dataset, var_dir: Path, formats: list[str]
+) -> dict[str, Path]:
+    """obs / raw / corrected hist, in the same formats as scen."""
+    paths: dict[str, Path] = {}
+    if "netcdf" in formats:
+        paths["netcdf"] = _write_netcdf(ds, var_dir / "hist_eval.nc")
+    if "csv" in formats:
+        path = var_dir / "hist_eval.csv"
+        df = ds.to_dataframe().reset_index()
+        df[["time", "station", "period", "obs", "raw", "corrected"]].to_csv(
+            path, index=False
+        )
+        paths["csv"] = path
+    return paths
+
+
 def write_result(
     scen: xr.DataArray,
     adj,
@@ -85,6 +109,7 @@ def write_result(
     var_name: str,
     formats: list[str],
     evaluation: pd.DataFrame | None = None,
+    hist_eval: xr.Dataset | None = None,
 ) -> dict:
     """Write one variable's results under run_dir/<var_name>/. Returns the written paths."""
     var_dir = run_dir / var_name
@@ -93,8 +118,12 @@ def write_result(
     scen_paths: dict[str, Path] = {}
     for fmt in formats:
         if fmt not in _WRITERS:
-            raise ValueError(f"Unsupported format: {fmt!r}. Valid formats: {sorted(_WRITERS)}.")
-        scen_paths[fmt] = _WRITERS[fmt](scen, var_dir / f"scen.{_EXTENSIONS[fmt]}", var_name)
+            raise ValueError(
+                f"Unsupported format: {fmt!r}. Valid formats: {sorted(_WRITERS)}."
+            )
+        scen_paths[fmt] = _WRITERS[fmt](
+            scen, var_dir / f"scen.{_EXTENSIONS[fmt]}", var_name
+        )
 
     adj_path = _write_netcdf(adj.ds, var_dir / "adj.nc")
 
@@ -103,17 +132,33 @@ def write_result(
         eval_path = var_dir / "evaluation.csv"
         evaluation.to_csv(eval_path, index=False)
 
-    return {"scen": scen_paths, "adj": adj_path, "evaluation": eval_path}
+    hist_eval_paths = (
+        _write_hist_eval(hist_eval, var_dir, formats) if hist_eval is not None else None
+    )
+
+    return {
+        "scen": scen_paths,
+        "adj": adj_path,
+        "evaluation": eval_path,
+        "hist_eval": hist_eval_paths,
+    }
 
 
 def write_qa(run_dir: Path, qa: list[QACheck]) -> Path:
     """Write every QACheck of the run to run_dir/qa.json."""
     path = run_dir / "qa.json"
-    path.write_text(json.dumps([c.as_dict() for c in qa], indent=2, default=str), encoding="utf-8")
+    path.write_text(
+        json.dumps([c.as_dict() for c in qa], indent=2, default=str), encoding="utf-8"
+    )
     return path
 
 
-def write_manifest(run_dir: Path, per_variable: dict[str, dict | None], *, config_path: Path | None = None) -> Path:
+def write_manifest(
+    run_dir: Path,
+    per_variable: dict[str, dict | None],
+    *,
+    config_path: Path | None = None,
+) -> Path:
     """Write run_dir/manifest.json (layout in the module docstring).
 
     A None entry means the variable failed, either in the pipeline or while
@@ -121,6 +166,7 @@ def write_manifest(run_dir: Path, per_variable: dict[str, dict | None], *, confi
     a missing one. Paths are relative to run_dir, in POSIX form, so the run
     folder stays valid when zipped, shared or moved to another machine.
     """
+
     def rel(p: Path | None) -> str | None:
         return None if p is None else p.relative_to(run_dir).as_posix()
 
@@ -134,6 +180,11 @@ def write_manifest(run_dir: Path, per_variable: dict[str, dict | None], *, confi
                 "scen": {fmt: rel(p) for fmt, p in written["scen"].items()},
                 "adj": rel(written["adj"]),
                 "evaluation": rel(written.get("evaluation")),
+                "hist_eval": (
+                    {fmt: rel(p) for fmt, p in written["hist_eval"].items()}
+                    if written.get("hist_eval")
+                    else None
+                ),
             }
 
     manifest = {
@@ -162,7 +213,9 @@ def _new_run_dir(base: Path) -> Path:
     return run_dir
 
 
-def write_run(out: dict, output_cfg: OutputConfig, *, config: dict | None = None) -> Path:
+def write_run(
+    out: dict, output_cfg: OutputConfig, *, config: dict | None = None
+) -> Path:
     """Write a whole run (the dict returned by pipeline.run_pipeline()) to disk.
 
     `config`, if given, is saved as config.json so the run can be reproduced.
@@ -179,7 +232,9 @@ def write_run(out: dict, output_cfg: OutputConfig, *, config: dict | None = None
     config_path = None
     if config is not None:
         config_path = run_dir / "config.json"
-        config_path.write_text(json.dumps(config, indent=2, default=str), encoding="utf-8")
+        config_path.write_text(
+            json.dumps(config, indent=2, default=str), encoding="utf-8"
+        )
 
     per_variable: dict[str, dict | None] = {}
     for name, res in out["results"].items():
@@ -194,14 +249,17 @@ def write_run(out: dict, output_cfg: OutputConfig, *, config: dict | None = None
                 var_name=name,
                 formats=output_cfg.formats,
                 evaluation=res.get("evaluation"),
+                hist_eval=res.get("hist_eval"),
             )
         except Exception as exc:  # isolates write errors, per variable
-            out["qa"].append(QACheck(
-                name=f"writers:{name}:exception",
-                status="fail",
-                message=f"Writing variable '{name}' failed: {exc}",
-                context={"variable": name},
-            ))
+            out["qa"].append(
+                QACheck(
+                    name=f"writers:{name}:exception",
+                    status="fail",
+                    message=f"Writing variable '{name}' failed: {exc}",
+                    context={"variable": name},
+                )
+            )
             per_variable[name] = None
 
     write_qa(run_dir, out["qa"])  # after the loop, so write failures are included

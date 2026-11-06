@@ -1,10 +1,11 @@
-"""Đọc dữ liệu thô (CSV điểm trạm, NetCDF/Zarr raster) thành xr.DataArray chuẩn hoá.
+"""Read raw inputs (station CSV, NetCDF/Zarr raster) into normalised xr.DataArray.
 
-Quy ước lỗi theo mẫu của `swatprep/converters/station_weather.py`:
-- Thiếu 1 phần dữ liệu đã khai báo trong metadata -> QACheck 'warn', bỏ qua
-  phần đó, tiếp tục với phần còn lại.
-- Không còn gì để xử lý (0 trạm khớp) -> QACheck 'fail' rồi raise, vì tiếp
-  tục với DataArray rỗng sẽ cho lỗi khó hiểu hơn ở bước xsdba.train().
+Error convention, following `swatprep/converters/station_weather.py`:
+- Part of the data declared in the metadata is missing -> QACheck 'warn',
+  skip that part, continue with the rest.
+- Nothing left to process (0 stations matched) -> QACheck 'fail' then raise,
+  because continuing with an empty DataArray gives a far more obscure error
+  later, inside xsdba.train().
 """
 
 from __future__ import annotations
@@ -31,14 +32,16 @@ def load_ref_points(ref_cfg, qa: list[QACheck], var_units: str = "") -> xr.DataA
                 missing.append(key)
                 continue
             df = pd.read_csv(f, parse_dates=["time"])
-            series[key] = df.set_index("time")["value"]
+            series[key] = pd.Series(
+                df["value"].to_numpy(), index=pd.DatetimeIndex(df["time"]), name=key
+            )
 
         if missing:
             qa.append(
                 QACheck(
                     name="ref_points:long:missing_files",
                     status="warn",
-                    message=f"{len(missing)} trạm có trong metadata nhưng không có file dữ liệu, sẽ bị bỏ qua.",
+                    message=f"{len(missing)} station(s) listed in the metadata have no data file; they are skipped.",
                     context={"missing_stations": sorted(missing)},
                 )
             )
@@ -53,13 +56,13 @@ def load_ref_points(ref_cfg, qa: list[QACheck], var_units: str = "") -> xr.DataA
                 QACheck(
                     name="ref_points:wide:missing_columns",
                     status="warn",
-                    message=f"{len(missing)} trạm có trong metadata nhưng không có cột dữ liệu, sẽ bị bỏ qua.",
+                    message=f"{len(missing)} station(s) listed in the metadata have no data column; they are skipped.",
                     context={"missing_stations": missing},
                 )
             )
         wide = raw[matched]
 
-    else:  # không thể xảy ra nếu đi qua pydantic, giữ lại cho an toàn khi gọi trực tiếp
+    else:  # unreachable after pydantic validation; kept for direct calls
         raise ValueError(
             f"Invalid station_layout: {ref_cfg.station_layout!r}. Valid layouts: ['long', 'wide']."
         )
@@ -78,7 +81,7 @@ def load_ref_points(ref_cfg, qa: list[QACheck], var_units: str = "") -> xr.DataA
         QACheck(
             name="ref_points:loaded",
             status="pass",
-            message=f"Đã nạp {len(wide.columns)} trạm (layout={ref_cfg.station_layout}).",
+            message=f"Loaded {len(wide.columns)} station(s) (layout={ref_cfg.station_layout}).",
             context={"n_stations": len(wide.columns), "stations": sorted(wide.columns)},
         )
     )
@@ -108,7 +111,7 @@ def _open_raw(raster_cfg) -> xr.Dataset | xr.DataArray:
 
 
 def load_raster_variable(raster_cfg, var_name: str) -> xr.DataArray:
-    """Mở 1 nguồn raster (NetCDF/Zarr) và trả về đúng 1 biến dưới dạng DataArray."""
+    """Open one raster source (NetCDF/Zarr) and return exactly one variable as a DataArray."""
     src = _open_raw(raster_cfg)
     return src[var_name] if isinstance(src, xr.Dataset) else src
 

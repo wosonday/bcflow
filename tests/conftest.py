@@ -36,8 +36,16 @@ def toy_config(toy_paths: dict[str, Path]) -> dict:
                         "metadata_path": str(toy_paths["tasmax_meta"]),
                         "path": str(toy_paths["tasmax_data"]),
                     },
-                    "hist": {"format": "netcdf", "path": str(toy_paths["tasmax_hist"]), "grid_type": "regular_latlon"},
-                    "sim": {"format": "netcdf", "path": str(toy_paths["tasmax_sim"]), "grid_type": "regular_latlon"},
+                    "hist": {
+                        "format": "netcdf",
+                        "path": str(toy_paths["tasmax_hist"]),
+                        "grid_type": "regular_latlon",
+                    },
+                    "sim": {
+                        "format": "netcdf",
+                        "path": str(toy_paths["tasmax_sim"]),
+                        "grid_type": "regular_latlon",
+                    },
                 },
             },
             {
@@ -57,8 +65,16 @@ def toy_config(toy_paths: dict[str, Path]) -> dict:
                         "metadata_path": str(toy_paths["pr_meta"]),
                         "path": str(toy_paths["pr_folder"]),
                     },
-                    "hist": {"format": "netcdf", "path": str(toy_paths["pr_hist"]), "grid_type": "regular_latlon"},
-                    "sim": {"format": "netcdf", "path": str(toy_paths["pr_sim"]), "grid_type": "regular_latlon"},
+                    "hist": {
+                        "format": "netcdf",
+                        "path": str(toy_paths["pr_hist"]),
+                        "grid_type": "regular_latlon",
+                    },
+                    "sim": {
+                        "format": "netcdf",
+                        "path": str(toy_paths["pr_sim"]),
+                        "grid_type": "regular_latlon",
+                    },
                 },
             },
         ]

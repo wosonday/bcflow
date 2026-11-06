@@ -37,9 +37,14 @@ def test_unquoted_yaml_years_and_dates_are_accepted():
     should not have to know that and quote them."""
     p = PeriodsConfig.model_validate({"calibration": [2000, date(2012, 12, 31)]})
     assert p.calibration == ("2000", "2012-12-31")
-    src = HistSimSourceConfig.model_validate({
-        "format": "netcdf", "path": "x.nc", "hist_period": [1980, 2014], "sim_period": [2015, 2100],
-    })
+    src = HistSimSourceConfig.model_validate(
+        {
+            "format": "netcdf",
+            "path": "x.nc",
+            "hist_period": [1980, 2014],
+            "sim_period": [2015, 2100],
+        }
+    )
     assert src.hist_period == ("1980", "2014")
 
 
@@ -51,8 +56,18 @@ def test_out_of_sample_evaluation_with_validation_period(toy_config):
     out = run_pipeline(cfg)
 
     for name in ("tasmax", "pr"):
-        table = out["results"][name]["evaluation"]
-        assert {"mean_bias", "sd_ratio", "qq_rmse"} <= set(table["metric"])
+        res = out["results"][name]
+        table = res["evaluation"]
+        assert {"mean_bias", "sd_ratio", "qq_rmse", "rmse"} <= set(table["metric"])
+        assert set(table["period"]) == {"calibration", "validation"}
+        # The correction is applied to hist over BOTH periods, each day labelled.
+        hist_eval = res["hist_eval"]
+        assert set(hist_eval["period"].values) == {"calibration", "validation"}
+        years = hist_eval["time"].dt.year
+        assert int(years.min()) == 2000 and int(years.max()) == 2020
+        assert {f"evaluation:{name}:calibration", f"evaluation:{name}:validation"} <= {
+            c.name for c in out["qa"]
+        }
     assert "wet_day_freq_diff" in set(out["results"]["pr"]["evaluation"]["metric"])
     assert not any(c.name.endswith(":in_sample") for c in out["qa"])
     done = next(c for c in out["qa"] if c.name == "train_adjust:tasmax:done")
@@ -62,8 +77,11 @@ def test_out_of_sample_evaluation_with_validation_period(toy_config):
 
 def test_without_periods_evaluation_is_in_sample_and_flagged(toy_config):
     out = run_pipeline(toy_config)
-    assert out["results"]["tasmax"]["evaluation"] is not None
-    assert any(c.name == "evaluation:tasmax:in_sample" and c.status == "warn" for c in out["qa"])
+    assert set(out["results"]["tasmax"]["evaluation"]["period"]) == {"calibration"}
+    assert any(
+        c.name == "evaluation:tasmax:in_sample" and c.status == "warn"
+        for c in out["qa"]
+    )
 
 
 def test_calibration_period_outside_data_fails_that_variable_only(toy_config):
@@ -74,4 +92,7 @@ def test_calibration_period_outside_data_fails_that_variable_only(toy_config):
 
     assert out["results"]["tasmax"] is None
     assert out["results"]["pr"] is not None
-    assert any(c.name == "periods:tasmax:ref:calibration_empty" and c.status == "fail" for c in out["qa"])
+    assert any(
+        c.name == "periods:tasmax:ref:calibration_empty" and c.status == "fail"
+        for c in out["qa"]
+    )

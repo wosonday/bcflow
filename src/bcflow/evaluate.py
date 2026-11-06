@@ -12,6 +12,10 @@ framework (Maraun et al., 2015):
     sd_ratio             sd(model) / sd(obs)                           ideal 1
     q10/q50/q90/q99_bias quantile(model) - quantile(obs)               ideal 0
     qq_rmse              RMSE between model and obs quantiles 1..99 %  ideal 0
+    rmse                 sqrt(mean((model(t) - obs(t))^2)) over common dates  ideal 0
+                     (time-paired; read next to qq_rmse -- for a free-running
+                     GCM it mostly measures weather timing, and restoring the
+                     observed variance can raise it: von Storch, 1999)
     wet_day_freq_diff    wet-day frequency(model) - (obs)              ideal 0
                          (only for kind '*' with a wet-day threshold)
 
@@ -25,6 +29,9 @@ References
 - Maraun, D., et al. (2015). VALUE: A framework to validate downscaling
   approaches for climate change studies. Earth's Future, 3(1), 1-14.
   https://doi.org/10.1002/2014EF000259
+- von Storch, H. (1999). On the use of "inflation" in statistical
+  downscaling. Journal of Climate, 12(12), 3505-3506.
+  https://doi.org/10.1175/1520-0442(1999)012<3505:OTUOII>2.0.CO;2
 """
 
 from __future__ import annotations
@@ -43,8 +50,29 @@ IDEAL = {
     "sd_ratio": 1.0,
     **{f"q{round(q * 100)}_bias": 0.0 for q in _REPORTED_QUANTILES},
     "qq_rmse": 0.0,
+    "rmse": 0.0,
     "wet_day_freq_diff": 0.0,
 }
+
+COLUMNS = ["period", "station", "metric", "ideal", "raw", "corrected", "improved"]
+
+
+def _date_keys(da: xr.DataArray) -> np.ndarray:
+    """Calendar dates as "YYYY-MM-DD" strings; works for datetime64 and cftime."""
+    return da["time"].dt.strftime("%Y-%m-%d").values
+
+
+def obs_on_model_dates(obs: xr.DataArray, model: xr.DataArray) -> xr.DataArray:
+    """Obs re-indexed onto the model's time axis, matched by calendar date.
+
+    Dates the model has but obs lacks become NaN; obs dates the model lacks
+    (e.g. 29 Feb for a 'noleap' model) are dropped. The result carries the
+    MODEL's time coordinate, so it can be subtracted from the model directly.
+    """
+    by_date = obs.reset_coords(drop=True).assign_coords(time=_date_keys(obs))
+    return by_date.reindex(time=_date_keys(model)).assign_coords(
+        time=model["time"].values
+    )
 
 
 def _wet_freq(da: xr.DataArray, thresh: float) -> xr.DataArray:
@@ -52,7 +80,12 @@ def _wet_freq(da: xr.DataArray, thresh: float) -> xr.DataArray:
     return (da >= thresh).where(da.notnull()).mean("time")
 
 
-def _metrics(model: xr.DataArray, obs: xr.DataArray, wet_thresh: float | None) -> dict[str, xr.DataArray]:
+def _metrics(
+    model: xr.DataArray,
+    obs: xr.DataArray,
+    obs_paired: xr.DataArray,
+    wet_thresh: float | None,
+) -> dict[str, xr.DataArray]:
     """Every metric, one value per station."""
     m = {
         "mean_bias": model.mean("time") - obs.mean("time"),
@@ -61,10 +94,18 @@ def _metrics(model: xr.DataArray, obs: xr.DataArray, wet_thresh: float | None) -
     qm = model.quantile(_QQ_LEVELS, dim="time")
     qo = obs.quantile(_QQ_LEVELS, dim="time")
     for q in _REPORTED_QUANTILES:
-        m[f"q{round(q * 100)}_bias"] = qm.sel(quantile=q, method="nearest") - qo.sel(quantile=q, method="nearest")
-    m["qq_rmse"] = np.sqrt(((qm - qo) ** 2).mean("quantile"))
+        m[f"q{round(q * 100)}_bias"] = qm.sel(quantile=q, method="nearest") - qo.sel(
+            quantile=q, method="nearest"
+        )
+    m["qq_rmse"] = np.sqrt(((qm - qo) ** 2).mean("quantile"))  # type: ignore[reportArgumentType]
+    # Time-paired: same calendar day only; NaN days (no obs) are skipped by mean().
+    m["rmse"] = np.sqrt(  # type: ignore[reportArgumentType]
+        ((model.reset_coords(drop=True) - obs_paired) ** 2).mean("time")
+    )
     if wet_thresh is not None:
-        m["wet_day_freq_diff"] = _wet_freq(model, wet_thresh) - _wet_freq(obs, wet_thresh)
+        m["wet_day_freq_diff"] = _wet_freq(model, wet_thresh) - _wet_freq(
+            obs, wet_thresh
+        )
     return m
 
 
@@ -74,17 +115,19 @@ def evaluate(
     corrected: xr.DataArray,
     *,
     wet_thresh: float | None = None,
+    period: str = "",
 ) -> pd.DataFrame:
     """Compare raw and corrected model to observations, per station.
 
     All three are (time, station) arrays over the SAME evaluation period.
     Returns a long table with columns:
-        station, metric, ideal, raw, corrected, improved
+        period, station, metric, ideal, raw, corrected, improved
     where `improved` is True if the corrected value is at least as close to
     the ideal as the raw one (None when a value is missing).
     """
-    before = _metrics(raw, obs, wet_thresh)
-    after = _metrics(corrected, obs, wet_thresh)
+    obs_paired = obs_on_model_dates(obs, raw)  # raw and corrected share one time axis
+    before = _metrics(raw, obs, obs_paired, wet_thresh)
+    after = _metrics(corrected, obs, obs_paired, wet_thresh)
 
     rows = []
     for metric, ideal in IDEAL.items():
@@ -93,16 +136,40 @@ def evaluate(
         for station in obs["station"].values:
             r = float(before[metric].sel(station=station))
             c = float(after[metric].sel(station=station))
-            improved = abs(c - ideal) <= abs(r - ideal) + 1e-12 if np.isfinite(r) and np.isfinite(c) else None
-            rows.append({
-                "station": str(station),
-                "metric": metric,
-                "ideal": ideal,
-                "raw": r,
-                "corrected": c,
-                "improved": improved,
-            })
-    return pd.DataFrame(rows, columns=["station", "metric", "ideal", "raw", "corrected", "improved"])
+            improved = (
+                abs(c - ideal) <= abs(r - ideal) + 1e-12
+                if np.isfinite(r) and np.isfinite(c)
+                else None
+            )
+            rows.append(
+                {
+                    "period": period,
+                    "station": str(station),
+                    "metric": metric,
+                    "ideal": ideal,
+                    "raw": r,
+                    "corrected": c,
+                    "improved": improved,
+                }
+            )
+    return pd.DataFrame(rows, columns=COLUMNS)
+
+
+def paired_series(
+    obs: xr.DataArray, raw: xr.DataArray, corrected: xr.DataArray, *, period: str
+) -> xr.Dataset:
+    """obs / raw / corrected on the model's dates, with a 'period' label per day.
+
+    For plotting and for users who want to recompute their own scores.
+    """
+    ds = xr.Dataset(
+        {
+            "obs": obs_on_model_dates(obs, raw),
+            "raw": raw.reset_coords(drop=True),
+            "corrected": corrected.reset_coords(drop=True),
+        }
+    )
+    return ds.assign_coords(period=("time", np.full(ds.sizes["time"], period)))
 
 
 def summarize(
@@ -110,10 +177,10 @@ def summarize(
     qa: list[QACheck],
     *,
     name: str,
+    label: str,
     period: tuple[str, str] | None,
-    in_sample: bool,
 ) -> None:
-    """Turn the evaluation table into QA checks readable without opening it."""
+    """One QA check for one evaluation period (label: 'calibration' | 'validation')."""
     period_txt = f"{period[0]}..{period[1]}" if period else "the full common period"
     deviation = {
         metric: {
@@ -123,38 +190,37 @@ def summarize(
         for metric, group in table.groupby("metric", sort=False)
     }
 
-    if in_sample:
-        qa.append(QACheck(
-            name=f"evaluation:{name}:in_sample",
-            status="warn",
-            message=(
-                f"No validation period set for '{name}': evaluated on the calibration data itself, "
-                "so the scores are optimistic. Set periods.validation for an independent check."
-            ),
-            context={"variable": name},
-        ))
+    def arrow(metric: str) -> str:
+        d = deviation.get(metric)
+        return f"{d['raw']:.3g} -> {d['corrected']:.3g}" if d else "n/a"
 
     mean_bias = table[table["metric"] == "mean_bias"]
     not_improved = sorted(mean_bias.loc[mean_bias["improved"].eq(False), "station"])
-    context = {"variable": name, "period": list(period) if period else None, "mean_abs_deviation": deviation}
+    scores = f"|mean bias| {arrow('mean_bias')}, qq_rmse {arrow('qq_rmse')}, rmse {arrow('rmse')}"
+    context = {
+        "variable": name,
+        "period_label": label,
+        "period": list(period) if period else None,
+        "mean_abs_deviation": deviation,
+    }
     if not_improved:
-        qa.append(QACheck(
-            name=f"evaluation:{name}:mean_bias_not_reduced",
-            status="warn",
-            message=(
-                f"Correction did not reduce |mean bias| at {len(not_improved)}/{len(mean_bias)} "
-                f"station(s) for '{name}' over {period_txt}: {', '.join(not_improved)}."
-            ),
-            context={**context, "stations": not_improved},
-        ))
+        qa.append(
+            QACheck(
+                name=f"evaluation:{name}:{label}",
+                status="warn",
+                message=(
+                    f"{label.capitalize()} {period_txt} for '{name}': correction did not reduce |mean bias| "
+                    f"at {len(not_improved)}/{len(mean_bias)} station(s) ({', '.join(not_improved)}); {scores}."
+                ),
+                context={**context, "stations": not_improved},
+            )
+        )
     else:
-        mb = deviation.get("mean_bias", {"raw": float("nan"), "corrected": float("nan")})
-        qa.append(QACheck(
-            name=f"evaluation:{name}:summary",
-            status="pass",
-            message=(
-                f"Correction reduced |mean bias| at all {len(mean_bias)} station(s) for '{name}' "
-                f"over {period_txt}: {mb['raw']:.3g} -> {mb['corrected']:.3g}."
-            ),
-            context=context,
-        ))
+        qa.append(
+            QACheck(
+                name=f"evaluation:{name}:{label}",
+                status="pass",
+                message=f"{label.capitalize()} {period_txt} for '{name}', all {len(mean_bias)} station(s): {scores}.",
+                context=context,
+            )
+        )
