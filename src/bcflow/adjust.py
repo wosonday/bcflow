@@ -5,6 +5,7 @@ Steps, in order:
     2. load ref, hist, sim                           (loaders.py)
     3. extract the grid cells nearest to each station (extract.py)
     4. bring all three to one unit                   (units.py)
+       and onto one daily time axis                  (timeaxis.py)
     5. keep the calibration period for training      (config: periods)
     6. optional frequency adaptation, train, adjust sim (xsdba)
     7. apply the correction to hist over the calibration and validation
@@ -29,6 +30,7 @@ from .grouping import build_grouper
 from .loaders import load_variable_sources
 from .methods import METHOD_REGISTRY
 from .qa import QACheck
+from .timeaxis import align_daily
 from .units import harmonize
 
 # Wet-day threshold when the config gives none: 1 mm/d, the ETCCDI convention
@@ -53,6 +55,7 @@ def run_variable(var_cfg: VariableConfig, qa: list[QACheck]) -> dict:
     hist = extract_nearest(hist_raw, ref, grid_cfg, qa, source_label=f"{name}:hist")
     sim = extract_nearest(sim_raw, ref, grid_cfg, qa, source_label=f"{name}:sim")
     ref, hist, sim, units = harmonize(ref, hist, sim, var_cfg.units, qa, name=name)
+    ref, hist, sim = align_daily(ref, hist, sim, qa, name=name)
 
     calibration = var_cfg.periods.calibration
     ref_cal = _calibration_slice(ref, calibration, qa, label=f"{name}:ref")
