@@ -37,7 +37,7 @@ def test_removing_a_shift_is_reported_as_improved_regardless_of_timing():
     mean_bias = table[table["metric"] == "mean_bias"]
     np.testing.assert_allclose(mean_bias["raw"], 5, atol=1e-9)
     np.testing.assert_allclose(mean_bias["corrected"], 0, atol=1e-9)
-    assert mean_bias["improved"].all()
+    assert bool(mean_bias["improved"].all())
 
     # Distribution metrics ignore day-by-day timing: a permuted copy is perfect.
     qq = table[table["metric"] == "qq_rmse"]
@@ -96,7 +96,7 @@ def test_paired_rmse_is_zero_after_removing_a_same_day_shift():
     rmse = _metric(table, "rmse")
     np.testing.assert_allclose(rmse["raw"], 5, atol=1e-9)
     np.testing.assert_allclose(rmse["corrected"], 0, atol=1e-9)
-    assert rmse["improved"].all()
+    assert bool(rmse["improved"].all())
 
 
 def test_paired_rmse_sees_timing_errors_that_distribution_metrics_ignore():

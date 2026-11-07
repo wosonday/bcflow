@@ -22,6 +22,7 @@ outputs/
 .agents/
 .aws/
 .codex/
+.zed/
 
 # Toy data (regenerate with scripts/make_toy_data.py)
 data/

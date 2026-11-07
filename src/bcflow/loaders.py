@@ -18,7 +18,7 @@ an error raised, because an empty array fails far less clearly inside xsdba.
 
 from __future__ import annotations
 
-from collections.abc import Hashable
+from collections.abc import Callable, Hashable
 from pathlib import Path
 from typing import NoReturn
 
@@ -345,14 +345,23 @@ def open_grid_reference(
 
 
 def scan_grid(
-    da: xr.DataArray, period: tuple[str, str] | None, *, chunk: int = 365
+    da: xr.DataArray,
+    period: tuple[str, str] | None,
+    *,
+    chunk: int = 365,
+    on_progress: Callable[[int, int], None] | None = None,
 ) -> tuple[np.ndarray, np.ndarray, int]:
     """One pass over the reference, a year at a time, to save memory.
 
     Returns (cells with any data, valid days per cell in the calibration
     window, number of calendar days in that window). Cells without any
     data (sea, outside the country) are not corrected at all.
+    If supplied, on_progress(completed, total) reports time steps before
+    processing (completed=0) and after each chunk; exceptions propagate.
     """
+    total = da.sizes["time"]
+    if on_progress is not None:
+        on_progress(0, total)
     index = da.indexes["time"]
     days = pd.DatetimeIndex(
         index if isinstance(index, pd.DatetimeIndex) else index.to_datetimeindex()
@@ -366,6 +375,8 @@ def scan_grid(
         finite = np.isfinite(np.asarray(da.isel(time=slice(a, a + chunk)).values))
         has_data |= finite.any(axis=0)
         valid += finite[in_window[a : a + chunk]].sum(axis=0)
+        if on_progress is not None:
+            on_progress(min(a + chunk, total), total)
     return has_data, valid, len(window)
 
 

@@ -31,6 +31,8 @@ import pandas as pd
 import pint
 import xarray as xr
 import xsdba
+from dask.base import compute
+from dask.delayed import delayed
 from xsdba.units import convert_units_to
 
 from .config_schema import PeriodsConfig, PipelineConfig
@@ -47,8 +49,10 @@ from .loaders import (
     scan_grid,
 )
 from .methods import METHOD_REGISTRY
+from .progress import RunControl
 from .qa import QACheck
 from .regrid import TargetGrid, regrid_to_points
+from .resources import WorkerPool, estimate_task_bytes, select_workers
 from .timeaxis import align_daily
 from .units import harmonize
 from .variables import VariableSpec
@@ -63,7 +67,13 @@ _DEFAULT_WET_DAY = "1 mm d-1"
 _SEED = 0
 
 
-def run_variable(cfg: PipelineConfig, variable: str, qa: list[QACheck]) -> dict:
+def run_variable(
+    cfg: PipelineConfig,
+    variable: str,
+    qa: list[QACheck],
+    *,
+    control: RunControl | None = None,
+) -> dict:
     """Bias-correct one variable of a validated config.
 
     Returns {"scen": corrected sim (time, station),
@@ -73,14 +83,20 @@ def run_variable(cfg: PipelineConfig, variable: str, qa: list[QACheck]) -> dict:
                           calibration and validation periods, or None,
              "grid": the TargetGrid of a gridded reference, else None}.
     With a gridded reference, 'station' holds one id per grid cell.
+    An optional control receives stage progress and cooperatively cancels
+    at stage boundaries (and after each reference scan chunk).
     """
+    if control is None:
+        control = RunControl()
+    control.check_cancelled()
     spec = cfg.spec(variable)
     # Before loading: a typo in the method name should not cost a full data load.
     _check_method(spec, qa)
     if cfg.grid is not None:
-        return _run_grid(cfg, spec, qa)
+        return _run_grid(cfg, spec, qa, control=control)
 
     model = cfg.model
+    control.progress(variable, "loading_reference")
     ref = load_station_variable(cfg.stations, variable, spec.units, qa)  # type: ignore[arg-type]
     # Early warning, before the (slow) model files are opened.
     check_coverage(
@@ -95,31 +111,61 @@ def run_variable(cfg: PipelineConfig, variable: str, qa: list[QACheck]) -> dict:
         "lon_name": model.lon_name,
         "search_radius": model.search_radius,
     }
+    control.progress(variable, "loading_model", source="hist")
+    hist_field = _reference_years(load_model_variable(model, "hist", variable, qa), ref)
+    control.progress(variable, "extracting", source="hist")
     hist = extract_nearest(
-        load_model_variable(model, "hist", variable, qa),
+        hist_field,
         ref,
         qa,
         source_label=f"{variable}:hist",
         **grid,
     )
+    control.progress(variable, "loading_model", source="sim")
+    sim_field = load_model_variable(model, "sim", variable, qa)
+    control.progress(variable, "extracting", source="sim")
     sim = extract_nearest(
-        load_model_variable(model, "sim", variable, qa),
+        sim_field,
         ref,
         qa,
         source_label=f"{variable}:sim",
         **grid,
     )
-    part = _correct(cfg, spec, ref, hist, sim, qa)
-    return _finish(cfg, spec, [part], qa, grid=None)
+    part = _correct(cfg, spec, ref, hist, sim, qa, control=control)
+    control.progress(variable, "combining")
+    result = _finish(cfg, spec, [part], qa, grid=None)
+    control.check_cancelled()
+    return result
 
 
-def _run_grid(cfg: PipelineConfig, spec: VariableSpec, qa: list[QACheck]) -> dict:
-    """Gridded reference: regrid the model onto the reference cells and correct
-    them block by block (grid.block_size cells), so memory stays bounded."""
+def _run_grid(
+    cfg: PipelineConfig,
+    spec: VariableSpec,
+    qa: list[QACheck],
+    *,
+    control: RunControl,
+) -> dict:
+    """Regrid in the parent, then correct CPU/RAM-budgeted batches of spatial blocks.
+
+    Workers keep full time series. Completed results accumulate in the parent;
+    budgeting is a heuristic, not a bound on total run memory. Parallel worker
+    stages are reported at batch boundaries, where cancellation is checked.
+    """
     variable, grid_cfg, model = spec.name, cfg.grid, cfg.model
     assert grid_cfg is not None  # narrowed for the type checker; checked by the caller
+    control.progress(variable, "loading_reference")
     reference, lat, lon = open_grid_reference(grid_cfg, variable, qa)
-    has_data, valid, window_days = scan_grid(reference, cfg.periods.calibration)
+    has_data, valid, window_days = scan_grid(
+        reference,
+        period=cfg.periods.calibration,
+        on_progress=lambda completed, total: control.progress(
+            variable,
+            "scanning_reference",
+            completed=completed,
+            total=total,
+            unit="time steps",
+        ),
+    )
     target = grid_target(reference, lat, lon, has_data)
     if target.size == 0:
         qa.append(
@@ -145,7 +191,11 @@ def _run_grid(cfg: PipelineConfig, spec: VariableSpec, qa: list[QACheck]) -> dic
         unit="cell",
     )
 
-    hist_all = load_model_variable(model, "hist", variable, qa)
+    control.progress(variable, "loading_model", source="hist")
+    hist_all = _reference_years(
+        load_model_variable(model, "hist", variable, qa), reference
+    )
+    control.progress(variable, "loading_model", source="sim")
     sim_all = load_model_variable(model, "sim", variable, qa)
     options = {
         "method": spec.regrid,
@@ -154,28 +204,189 @@ def _run_grid(cfg: PipelineConfig, spec: VariableSpec, qa: list[QACheck]) -> dic
         "lon_name": model.lon_name,
     }
     parts = []
-    for start in range(0, target.size, grid_cfg.block_size):
-        block = target.block(start, start + grid_cfg.block_size)
-        block_qa: list[QACheck] = []
-        ref = load_grid_points(reference, block, variable)
-        hist = _clip(
-            regrid_to_points(
-                hist_all, block, block_qa, source_label=f"{variable}:hist", **options
-            ),
-            spec,
-        )
-        sim = _clip(
-            regrid_to_points(
-                sim_all, block, block_qa, source_label=f"{variable}:sim", **options
-            ),
-            spec,
-        )
-        parts.append(_correct(cfg, spec, ref, hist, sim, block_qa, compact=True))
-        # The first block reports every step; later ones only what went wrong.
-        qa.extend(
-            block_qa if start == 0 else [c for c in block_qa if c.status != "pass"]
-        )
-    return _finish(cfg, spec, parts, qa, grid=target)
+    block_size = grid_cfg.block_size
+    total_blocks = (target.size + block_size - 1) // block_size
+    quantiles = spec.train_params.get("nquantiles", 50)
+    quantile_count = quantiles if isinstance(quantiles, int) else len(quantiles)
+    groups = {"month": 12, "dayofyear": 366, "none": 1}[spec.group]
+    completed_cells = 0
+    warned_memory = False
+    start = 0
+    with WorkerPool() as pool:
+        while start < target.size:
+            control.check_cancelled()
+            estimated_bytes = estimate_task_bytes(
+                reference.sizes["time"],
+                hist_all.sizes["time"],
+                sim_all.sizes["time"],
+                min(block_size, target.size - start),
+                nquantiles=quantile_count,
+                groups=groups,
+            )
+            selection = select_workers(
+                grid_cfg.workers,
+                grid_cfg.memory_fraction,
+                (target.size - start + block_size - 1) // block_size,
+                estimated_bytes,
+            )
+            control.progress(
+                variable,
+                "worker_selection",
+                workers=selection.workers,
+                cpu_limit=selection.cpu_limit,
+                memory_limit=selection.memory_limit,
+                available_bytes=selection.available_bytes,
+                budget_bytes=selection.budget_bytes,
+                estimated_task_bytes=estimated_bytes,
+                over_budget=selection.over_budget,
+            )
+            if selection.over_budget and not warned_memory:
+                qa.append(
+                    QACheck(
+                        name=f"resources:{variable}:memory",
+                        status="warn",
+                        message="One block exceeds the estimated RAM budget, or available RAM could not be determined. "
+                        "Using one worker; reduce grid.block_size if memory is tight. Estimates do not guarantee against out-of-memory errors.",
+                        context={
+                            "variable": variable,
+                            "estimated_task_bytes": estimated_bytes,
+                            "budget_bytes": selection.budget_bytes,
+                        },
+                    )
+                )
+                warned_memory = True
+
+            tasks = []
+            contexts = []
+            batch_parts = []
+            batch_stop = min(target.size, start + selection.workers * block_size)
+            for block_start in range(start, batch_stop, block_size):
+                block = target.block(block_start, block_start + block_size)
+                block_context = {
+                    "block_index": block_start // block_size + 1,
+                    "total_blocks": total_blocks,
+                    "completed_cells": completed_cells,
+                    "total_cells": target.size,
+                    "block_cells": block.size,
+                }
+                control.progress(variable, "block_started", **block_context)
+                block_qa: list[QACheck] = []
+                control.progress(
+                    variable, "extracting", source="reference", **block_context
+                )
+                ref = load_grid_points(reference, block, variable)
+                control.progress(variable, "regridding", source="hist", **block_context)
+                hist = _clip(
+                    regrid_to_points(
+                        hist_all,
+                        block,
+                        block_qa,
+                        source_label=f"{variable}:hist",
+                        **options,
+                    ),
+                    spec,
+                )
+                control.progress(variable, "regridding", source="sim", **block_context)
+                sim = _clip(
+                    regrid_to_points(
+                        sim_all,
+                        block,
+                        block_qa,
+                        source_label=f"{variable}:sim",
+                        **options,
+                    ),
+                    spec,
+                )
+                contexts.append(block_context)
+                if selection.workers == 1:
+                    part = _correct(
+                        cfg,
+                        spec,
+                        ref,
+                        hist,
+                        sim,
+                        block_qa,
+                        compact=True,
+                        control=control,
+                        block_context=block_context,
+                    )
+                    batch_parts.append((part, block_qa))
+                else:
+                    # Only materialized arrays go to workers, never open files or CLI callbacks.
+                    tasks.append(
+                        delayed(_correct_block_task)(
+                            cfg, spec, ref, hist, sim, block_qa
+                        )
+                    )
+
+            if tasks:
+                control.progress(
+                    variable,
+                    "training_and_adjusting",
+                    **contexts[-1],
+                    active_blocks=len(tasks),
+                )
+                batch_parts = list(
+                    compute(
+                        *tasks,
+                        scheduler="processes",
+                        pool=pool.get(selection.workers),
+                        chunksize=1,
+                    )
+                )
+            control.check_cancelled()
+            for context, (part, block_qa) in zip(contexts, batch_parts, strict=True):
+                parts.append(part)
+                qa.extend(
+                    block_qa
+                    if context["block_index"] == 1
+                    else [c for c in block_qa if c.status != "pass"]
+                )
+                completed_cells += context["block_cells"]
+                control.progress(
+                    variable,
+                    "block_finished",
+                    **{**context, "completed_cells": completed_cells},
+                )
+            # Release prepared inputs before measuring the next batch's free RAM.
+            del tasks, batch_parts
+            ref = hist = sim = None
+            start = batch_stop
+    control.progress(variable, "combining")
+    result = _finish(cfg, spec, parts, qa, grid=target)
+    control.check_cancelled()
+    return result
+
+
+def _correct_block_task(
+    cfg: PipelineConfig,
+    spec: VariableSpec,
+    ref: xr.DataArray,
+    hist: xr.DataArray,
+    sim: xr.DataArray,
+    block_qa: list[QACheck],
+) -> tuple[dict, list[QACheck]]:
+    """Return both results and QA; mutations in worker processes are not shared."""
+    part = _correct(cfg, spec, ref, hist, sim, block_qa, compact=True)
+    # xsdba's pickle state omits .ds; only the trained dataset is needed after
+    # correction/evaluation, so use the same dataset wrapper as combined blocks.
+    part["adj"] = _CombinedAdjustment(part["adj"].ds)
+    return part, block_qa
+
+
+def _reference_years(hist: xr.DataArray, reference: xr.DataArray) -> xr.DataArray:
+    """hist cut to the years the reference covers.
+
+    Only those days can be trained on or evaluated (align_daily keeps the
+    common days anyway), so a CMIP hist of 1850-2014 against observations
+    of 1980-2014 would otherwise be read, regridded and held in memory
+    ~5 times over for nothing. The result is unchanged.
+    """
+    index = hist.indexes["time"]
+    if not index.is_monotonic_increasing:
+        return hist
+    years = reference["time"].dt.year
+    return hist.sel(time=slice(str(int(years.min())), str(int(years.max()))))
 
 
 def _clip(da: xr.DataArray, spec: VariableSpec) -> xr.DataArray:
@@ -196,14 +407,22 @@ def _correct(
     qa: list[QACheck],
     *,
     compact: bool = False,
+    control: RunControl | None = None,
+    block_context: dict[str, int] | None = None,
 ) -> dict:
     """Units, time axis, training, adjustment and evaluation of one set of
     points (all stations, or one block of grid cells).
 
     With compact=True the results are kept as float32, halving memory for
-    large grids.
+    large grids. Outputs are materialized before returning, so a caller
+    can truthfully report block completion even when xsdba returns lazy data.
+    Progress stages include block_context when supplied.
     """
+    if control is None:
+        control = RunControl()
+    context = block_context or {}
     variable = spec.name
+    control.progress(variable, "preparing", **context)
     ref, hist, sim, units = harmonize(ref, hist, sim, spec.units, qa, name=variable)
     ref, hist, sim = align_daily(ref, hist, sim, qa, name=variable)
 
@@ -211,6 +430,7 @@ def _correct(
     ref_cal = _calibration_slice(ref, calibration, qa, label=f"{variable}:ref")
     hist_cal = _calibration_slice(hist, calibration, qa, label=f"{variable}:hist")
 
+    control.progress(variable, "training", **context)
     zeros = _ZeroHandling(spec, units)
     ref_cal, hist_cal = zeros.jitter(ref_cal), zeros.jitter(hist_cal)
 
@@ -241,13 +461,22 @@ def _correct(
 
     train_kwargs = {**spec.train_params, "group": group, "kind": spec.kind}
     adj = METHOD_REGISTRY[spec.method].train(ref_cal, hist_train, **train_kwargs)
+    control.progress(variable, "adjustment", **context)
     scen = _adjust(adj, sim, spec, zeros)
+    control.progress(variable, "evaluation", **context)
     tables, series = _evaluate_block(
         spec, cfg.periods, adj, ref, hist, units, zeros, qa
     )
     if compact:
         scen = scen.astype("float32")
         series = [s.astype("float32") for s in series]
+    control.check_cancelled()
+    # Accessing .values for QA computes lazy arrays but does not retain them.
+    scen.load()
+    adj.ds.load()
+    for s in series:
+        s.load()
+    control.check_cancelled()
     return {
         "scen": scen,
         "adj": adj,

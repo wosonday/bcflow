@@ -113,6 +113,8 @@ class GridReferenceConfig(BaseModel):
     block_size: int = Field(
         default=500, ge=1
     )  # cells corrected together; lower it to save memory
+    workers: Literal["auto"] | Annotated[int, Field(ge=1, strict=True)] = "auto"
+    memory_fraction: float = Field(default=0.6, gt=0, le=1)
 
 
 class ModelConfig(BaseModel):
@@ -155,12 +157,14 @@ class CorrectionConfig(BaseModel):
 
 def _span(period: tuple[str, str], field: str) -> tuple[pd.Timestamp, pd.Timestamp]:
     """First and last instant covered: ("2000", "2014") -> 2000-01-01 .. 2014-12-31."""
+    message = f"periods.{field}: invalid date in {list(period)}; use e.g. '2000' or '2000-01-31'."
     try:
-        start, end = pd.Period(period[0]).start_time, pd.Period(period[1]).end_time
+        first, last = pd.Period(period[0]), pd.Period(period[1])
     except ValueError:
-        raise ValueError(
-            f"periods.{field}: invalid date in {list(period)}; use e.g. '2000' or '2000-01-31'."
-        ) from None
+        raise ValueError(message) from None
+    if not isinstance(first, pd.Period) or not isinstance(last, pd.Period):  # "NaT"
+        raise ValueError(message)
+    start, end = first.start_time, last.end_time
     if start > end:
         raise ValueError(
             f"periods.{field}: start {period[0]!r} is after end {period[1]!r}."

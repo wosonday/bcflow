@@ -35,7 +35,8 @@ manifest.json (schema_version 1), all paths relative to the run folder:
      "variables": {"<var>": {"status": "ok", "scen": {"netcdf": "<var>/scen.nc"},
                              "adj": "<var>/adj.nc", "evaluation": "<var>/evaluation.csv" | null,
                              "hist_eval": {"netcdf": "<var>/hist_eval.nc"} | null}
-                   | {"status": "failed"}}}
+                   | {"status": "failed" | "cancelled" | "skipped"}},
+     "status": "ok" | "failed" | "cancelled"}
 """
 
 from __future__ import annotations
@@ -52,6 +53,7 @@ from xarray.coding.times import encode_cf_datetime
 
 from ._version import bcflow_version
 from .config_schema import OutputConfig
+from .progress import RunControl
 from .qa import QACheck
 from .regrid import TargetGrid
 
@@ -295,6 +297,8 @@ def write_manifest(
     per_variable: dict[str, dict | None],
     *,
     config_path: Path | None = None,
+    variable_statuses: dict[str, str] | None = None,
+    cancelled: bool = False,
 ) -> Path:
     """Write run_dir/manifest.json (layout in the module docstring).
 
@@ -324,7 +328,18 @@ def write_manifest(
                 ),
             }
 
+    for name, status in (variable_statuses or {}).items():
+        if name not in variables:
+            variables[name] = {"status": status}
+
     manifest = {
+        "status": "cancelled"
+        if cancelled
+        else (
+            "failed"
+            if any(v["status"] == "failed" for v in variables.values())
+            else "ok"
+        ),
         "schema_version": MANIFEST_SCHEMA_VERSION,
         "bcflow_version": bcflow_version(),
         "created": datetime.now().astimezone().isoformat(timespec="seconds"),
@@ -351,7 +366,11 @@ def _new_run_dir(base: Path) -> Path:
 
 
 def write_run(
-    out: dict, output_cfg: OutputConfig, *, config: dict | None = None
+    out: dict,
+    output_cfg: OutputConfig,
+    *,
+    config: dict | None = None,
+    control: RunControl | None = None,
 ) -> Path:
     """Write a whole run (the dict returned by pipeline.run_pipeline()) to disk.
 
@@ -362,6 +381,8 @@ def write_run(
     APPENDED to out["qa"] (so the caller's report shows it), the variable is
     marked failed in the manifest, and the other variables are still written.
 
+    Completed results are still saved when control is cancelled. Cancelled and
+    skipped variables have status-only manifest entries, without output files.
     Returns the path of manifest.json; its parent is the run directory.
     """
     run_dir = _new_run_dir(Path(output_cfg.path))
@@ -378,6 +399,9 @@ def write_run(
         if res is None:  # already failed in the pipeline; its QACheck is in out["qa"]
             per_variable[name] = None
             continue
+        if control is not None:
+            # Cancellation stops computation, not preservation of completed results.
+            control.emit({"event": "progress", "variable": name, "stage": "writing"})
         try:
             per_variable[name] = write_result(
                 res["scen"],
@@ -401,4 +425,13 @@ def write_run(
             per_variable[name] = None
 
     write_qa(run_dir, out["qa"])  # after the loop, so write failures are included
-    return write_manifest(run_dir, per_variable, config_path=config_path)
+    out["cancelled"] = out.get("cancelled", False) or (
+        control is not None and control.cancelled
+    )
+    return write_manifest(
+        run_dir,
+        per_variable,
+        config_path=config_path,
+        variable_statuses=out.get("variable_statuses"),
+        cancelled=out["cancelled"],
+    )

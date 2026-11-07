@@ -17,18 +17,23 @@ Exit codes:
     0  success (run: no failed check; validate: config valid, warnings allowed)
     1  finished with failures (run: a variable failed; validate: config invalid)
     2  could not start (unreadable config, bad 'output' section, path not found)
+    130 cancelled (completed variables are saved unless a second Ctrl+C forces exit)
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import signal
 import sys
+import threading
 from pathlib import Path
 
 import numpy as np
+from tqdm import tqdm
 
 from . import service
+from .progress import RunControl
 
 _ICON = {"pass": "[PASS]", "warn": "[WARN]", "fail": "[FAIL]"}
 
@@ -60,15 +65,21 @@ def _print_run_report(summary: dict) -> None:
         for check in summary["qa"]:
             print(f"{_ICON[check['status']]} {check['name']}: {check['message']}")
         print()
+    if summary["variables"]:
         print("=" * 70)
         print("RESULTS PER VARIABLE")
         print("=" * 70)
         for name, status in summary["variables"].items():
-            print(f"{name}: {'OK' if status == 'ok' else 'FAILED (see QA report)'}")
+            print(f"{name}: {status.upper()}")
         c = summary["counts"]
         n_ok = sum(1 for s in summary["variables"].values() if s == "ok")
         print(
             f"\nTotal: {c['fail']} fail, {c['warn']} warn, {n_ok}/{len(summary['variables'])} variables succeeded."
+        )
+    if summary["status"] == "cancelled":
+        print(
+            "Run cancelled. Unfinished work was discarded."
+            + (" Fully completed variables were saved." if summary["run_dir"] else "")
         )
     if summary["run_dir"]:
         print(f"Outputs written to: {summary['run_dir']}")
@@ -76,14 +87,176 @@ def _print_run_report(summary: dict) -> None:
         print(f"[FAIL] {summary['error']}", file=sys.stderr)
 
 
-def _cmd_run(args) -> int:
-    if args.json:
-        summary = service.run_config_file(args.config, on_event=_emit_json)
-        _emit_json({"event": "run_finished", **summary})
+def _print_progress(event: dict) -> None:
+    kind = event["event"]
+    if kind == "run_started":
+        text = "Starting run. Press Ctrl+C to cancel and save completed variables."
+    elif kind == "variable_started":
+        text = f"[{event['index']}/{event['total']}] Starting {event['variable']}"
+    elif kind == "variable_finished":
+        text = f"{event['variable']}: {event['status'].upper()}"
+    elif kind == "run_cancelled":
+        text = event["message"]
+    elif kind == "progress":
+        text = f"{event['variable']}: {event['stage'].replace('_', ' ')}"
+        if "source" in event:
+            text += f" ({event['source']})"
+        if event["stage"] == "worker_selection":
+            text += (
+                f" | {event['workers']} worker(s), CPU limit {event['cpu_limit']} (CPU count - 1)"
+                f" | RAM limit {event['memory_limit']}"
+                f" | estimated {event['estimated_task_bytes'] / 1024**3:.2f} GiB/task"
+                f" | budget {event['budget_bytes'] / 1024**3:.2f} GiB"
+            )
+            if event["over_budget"]:
+                text += " | WARNING: one block exceeds budget; consider a smaller block_size"
+        if "block_index" in event:
+            completed, total = event["completed_cells"], event["total_cells"]
+            text += (
+                f" | block {event['block_index']}/{event['total_blocks']}"
+                f" | {completed}/{total} cells ({completed / total:.1%})"
+            )
+        elif "completed" in event:
+            text += f" | {event['completed']}/{event['total']} {event['unit']}"
     else:
-        summary = service.run_config_file(args.config)
-        _print_run_report(summary)
-    return summary["exit_code"]
+        return
+    print(
+        f"[{event.get('elapsed_seconds', 0):.1f}s] {text}", file=sys.stderr, flush=True
+    )
+
+
+class _TerminalProgress:
+    """Render existing events as bars only when stderr is an interactive terminal."""
+
+    def __init__(self):
+        self.interactive = sys.stderr.isatty()
+        self.bar = None
+        self.key: tuple[str, str] | None = None
+
+    def close(self) -> None:
+        if self.bar is not None:
+            self.bar.close()
+            self.bar = None
+        self.key = None
+
+    def __call__(self, event: dict) -> None:
+        if not self.interactive:
+            _print_progress(event)
+            return
+        kind = event["event"]
+        if kind != "progress":
+            if kind in {"variable_started", "variable_finished", "run_cancelled"}:
+                self.close()
+            _print_progress(event)
+            return
+
+        variable, stage = event["variable"], event["stage"]
+        if stage == "worker_selection" and self.bar is not None:
+            self.bar.set_postfix_str(
+                f"{event['workers']} worker(s) | CPU limit {event['cpu_limit']} | RAM limit {event['memory_limit']}"
+                + (" | RAM budget exceeded" if event["over_budget"] else "")
+            )
+            return
+        if "block_index" in event:
+            key = (variable, "cells")
+            total, completed, unit = (
+                event["total_cells"],
+                event["completed_cells"],
+                "cell",
+            )
+            detail = f"block {event['block_index']}/{event['total_blocks']} | {stage.replace('_', ' ')}"
+        elif stage == "scanning_reference":
+            key = (variable, "scan")
+            total, completed, unit = event["total"], event["completed"], "step"
+            detail = "scanning reference"
+        else:
+            self.close()
+            _print_progress(event)
+            return
+
+        if self.key != key:
+            self.close()
+            self.bar = tqdm(
+                total=total,
+                desc=variable,
+                unit=unit,
+                file=sys.stderr,
+                dynamic_ncols=True,
+                mininterval=0.2,
+            )
+            self.key = key
+        if self.bar is not None:
+            if "source" in event:
+                detail += f" ({event['source']})"
+            self.bar.set_postfix_str(detail, refresh=False)
+            # Stages change the label, but only completed blocks advance the bar.
+            self.bar.update(max(0, completed - self.bar.n))
+            self.bar.refresh()
+
+
+class _ForcedCancellation(BaseException):
+    """Bypass pipeline recovery when the user explicitly forces termination."""
+
+
+def _cmd_run(args) -> int:
+    progress = None if args.json else _TerminalProgress()
+    control = RunControl(
+        _emit_json if args.json else progress, cancel_file=args.cancel_file
+    )
+
+    def cancel_run(_signum, _frame):
+        if control.cancelled:
+            raise _ForcedCancellation()
+        control.request_cancel()
+        print(
+            "Cancellation requested. Waiting for the current operation, then saving completed variables. "
+            "Press Ctrl+C again to force exit (outputs may be incomplete).",
+            file=sys.stderr,
+            flush=True,
+        )
+
+    # signal.signal is only legal in the main thread; library callers can use RunControl.
+    install_handler = threading.current_thread() is threading.main_thread()
+    previous_handler = (
+        signal.signal(signal.SIGINT, cancel_run) if install_handler else None
+    )
+    try:
+        try:
+            summary = service.run_config_file(args.config, control=control)
+        except KeyboardInterrupt, _ForcedCancellation:
+            print(
+                "Forced cancellation. Output files may be incomplete.",
+                file=sys.stderr,
+                flush=True,
+            )
+            if args.json:
+                _emit_json(
+                    {
+                        "event": "run_finished",
+                        "status": "cancelled",
+                        "exit_code": 130,
+                        "forced": True,
+                        "error": "Interrupted before results could be safely saved.",
+                        "run_dir": None,
+                        "manifest": None,
+                        "variables": {},
+                        "counts": {"pass": 0, "warn": 0, "fail": 0},
+                        "qa": [],
+                    }
+                )
+            return 130
+        if progress is not None:
+            progress.close()
+        if args.json:
+            _emit_json({"event": "run_finished", **summary})
+        else:
+            _print_run_report(summary)
+        return summary["exit_code"]
+    finally:
+        if progress is not None:
+            progress.close()
+        if install_handler:
+            signal.signal(signal.SIGINT, previous_handler)
 
 
 def _cmd_validate(args) -> int:
@@ -156,6 +329,14 @@ def _build_parser() -> argparse.ArgumentParser:
     run = sub.add_parser("run", help="run the pipeline and write the outputs")
     run.add_argument("config", type=Path, help="path to a YAML or JSON config file")
     run.add_argument("--json", action="store_true", help=json_help)
+    run.add_argument(
+        "--cancel-file",
+        type=Path,
+        default=None,
+        metavar="PATH",
+        help="cancel the run (saving completed variables) as soon as this file exists; "
+        "for a GUI that cannot send Ctrl+C",
+    )
 
     validate = sub.add_parser("validate", help="check a config without running it")
     validate.add_argument(

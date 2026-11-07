@@ -14,16 +14,18 @@ adjust.py's job.
 
 from __future__ import annotations
 
-from collections.abc import Callable
-
 from .adjust import run_variable
 from .config_schema import PipelineConfig, load_config
+from .progress import EventHandler, RunControl
 from .qa import QACheck
 
-EventHandler = Callable[[dict], None]
 
-
-def run_pipeline(config: PipelineConfig | dict, on_event: EventHandler | None = None) -> dict:
+def run_pipeline(
+    config: PipelineConfig | dict,
+    on_event: EventHandler | None = None,
+    *,
+    control: RunControl | None = None,
+) -> dict:
     """Run every variable in config.variables.
 
     Raises ValueError (pydantic's ValidationError is one) if the config is
@@ -33,12 +35,21 @@ def run_pipeline(config: PipelineConfig | dict, on_event: EventHandler | None = 
     show live progress (the CLI's --json mode prints them as JSON lines):
         {"event": "run_started", "variables": [name, ...]}
         {"event": "variable_started", "variable": name, "index": i, "total": n}
+        {"event": "progress", "variable": name, "stage": stage, ...}
         {"event": "qa", "variable": name, "check": {...}}   one per new QACheck
-        {"event": "variable_finished", "variable": name, "status": "ok" | "failed"}
+        {"event": "variable_finished", "variable": name, "status": status}
+        {"event": "run_cancelled", ...}   on interruption
 
-    Returns {"results": {name: {"scen", "adj", "evaluation", "hist_eval"} | None}, "qa": [...]}.
+    Pass a RunControl to request cancellation between expensive stages. An explicit
+    on_event overrides the control's callback. Cancellation retains completed
+    results, omits the active variable's partial results, and skips later variables.
+
+    Returns results, qa, cancelled, and variable_statuses (ok/failed/cancelled/skipped).
     """
-    emit = on_event or (lambda event: None)
+    control = control or RunControl()
+    if on_event is not None:
+        control.on_event = on_event
+    emit = control.emit
     cfg = config if isinstance(config, PipelineConfig) else load_config(config)
     names = [str(v) for v in cfg.variables]
 
@@ -46,30 +57,74 @@ def run_pipeline(config: PipelineConfig | dict, on_event: EventHandler | None = 
     results: dict[str, dict | None] = {}
     emit({"event": "run_started", "variables": names})
 
-    for index, name in enumerate(names, start=1):
-        emit({"event": "variable_started", "variable": name, "index": index, "total": len(names)})
-        first_new = len(qa)
-        try:
-            results[name] = run_variable(cfg, name, qa)
-        except Exception as exc:  # isolates runtime errors, per variable
-            qa.append(
-                QACheck(
-                    name=f"pipeline:{name}:exception",
-                    status="fail",
-                    message=f"Variable '{name}' failed: {exc}",
-                    context={"variable": name},
-                )
+    statuses = dict.fromkeys(names, "skipped")
+    active: str | None = None
+    first_new = 0
+    try:
+        control.check_cancelled()
+        for index, name in enumerate(names, start=1):
+            control.check_cancelled()
+            active = name
+            first_new = len(qa)
+            emit(
+                {
+                    "event": "variable_started",
+                    "variable": name,
+                    "index": index,
+                    "total": len(names),
+                }
             )
-            results[name] = None
+            control.check_cancelled()
+            try:
+                results[name] = run_variable(cfg, name, qa, control=control)
+            except Exception as exc:  # isolates runtime errors, per variable
+                qa.append(
+                    QACheck(
+                        name=f"pipeline:{name}:exception",
+                        status="fail",
+                        message=f"Variable '{name}' failed: {exc}",
+                        context={"variable": name},
+                    )
+                )
+                results[name] = None
 
-        for check in qa[first_new:]:
-            emit({"event": "qa", "variable": name, "check": check.as_dict()})
+            statuses[name] = "ok" if results[name] is not None else "failed"
+            active = None
+            for check in qa[first_new:]:
+                emit({"event": "qa", "variable": name, "check": check.as_dict()})
+            emit(
+                {
+                    "event": "variable_finished",
+                    "variable": name,
+                    "status": statuses[name],
+                }
+            )
+        control.check_cancelled()
+    except KeyboardInterrupt:
+        control.request_cancel()
+        if active is not None:
+            results.pop(active, None)
+            statuses[active] = "cancelled"
+            for check in qa[first_new:]:
+                emit({"event": "qa", "variable": active, "check": check.as_dict()})
+            emit(
+                {
+                    "event": "variable_finished",
+                    "variable": active,
+                    "status": "cancelled",
+                }
+            )
         emit(
             {
-                "event": "variable_finished",
-                "variable": name,
-                "status": "ok" if results[name] is not None else "failed",
+                "event": "run_cancelled",
+                "variable": active,
+                "message": "Saving completed variables; unfinished work is discarded.",
             }
         )
 
-    return {"results": results, "qa": qa}
+    return {
+        "results": results,
+        "qa": qa,
+        "cancelled": control.cancelled,
+        "variable_statuses": statuses,
+    }

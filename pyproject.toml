@@ -16,6 +16,9 @@ dependencies = [
     "h5netcdf>=1.3",
     "scipy>=1.11",
     "numpy>=2.5.4",
+    "tqdm>=4.67",
+    "dask[array]>=2026.8.0",
+    "psutil>=7.0",
 ]
 
 [project.scripts]
@@ -30,6 +33,8 @@ build-backend = "uv_build"
 
 [tool.basedpyright]
 typeCheckingMode = "standard"
+# Same as requires-python; ruff formats `except A, B:` (PEP 758, Python 3.14 only).
+pythonVersion = "3.14"
 extraPaths = ["scripts"]
 reportReturnType = "none"
 

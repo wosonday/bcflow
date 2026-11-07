@@ -31,7 +31,8 @@ from .loaders import (
     station_file,
 )
 from .methods import METHOD_REGISTRY
-from .pipeline import EventHandler, run_pipeline
+from .pipeline import run_pipeline
+from .progress import EventHandler, RunControl
 from .qa import QACheck
 from .variables import VARIABLES
 from .writers import write_run
@@ -403,13 +404,15 @@ def _summary(
             ].items()
         }
     elif out:
-        variables = {
+        variables = out.get("variable_statuses") or {
             n: ("ok" if r is not None else "failed") for n, r in out["results"].items()
         }
     else:
         variables = {}
 
-    if error is not None:
+    if out and out.get("cancelled"):
+        exit_code, status = 130, "cancelled"
+    elif error is not None:
         exit_code, status = 2, "error"
     else:
         exit_code = 0 if counts["fail"] == 0 else 1
@@ -427,30 +430,62 @@ def _summary(
     }
 
 
-def run_config_file(path: str | Path, on_event: EventHandler | None = None) -> dict:
+def run_config_file(
+    path: str | Path,
+    on_event: EventHandler | None = None,
+    *,
+    control: RunControl | None = None,
+) -> dict:
     """Run every variable of a config file and write the outputs.
 
-    Returns {"status": "ok" | "failed" | "error", "exit_code": 0 | 1 | 2,
-             "error": str | None, "run_dir", "manifest", "variables": {name: "ok" | "failed"},
+    Cancellation preserves fully computed variables, discards the active one,
+    and returns status 'cancelled' / exit code 130. Unstarted variables are 'skipped'.
+
+    Returns {"status": "ok" | "failed" | "error" | "cancelled", "exit_code": 0 | 1 | 2 | 130,
+             "error": str | None, "run_dir", "manifest", "variables": {name: status},
              "counts": {"pass", "warn", "fail"}, "qa": [check, ...]}.
     exit_code 2 / status "error" means the run could not start (invalid
     config, or its output folder could not be created); 1 means it ran with failures.
     """
-    emit = on_event or (lambda event: None)
+    control = control or RunControl()
+    if on_event is not None:
+        control.on_event = on_event
+    emit = control.emit
     try:
         raw = load_config_file(path)
         # The whole config is validated before any variable is computed;
         # pydantic's ValidationError is a ValueError.
         cfg = load_config(raw)
-        out = run_pipeline(cfg, on_event=emit)
+        out = run_pipeline(cfg, control=control)
     except ValueError as exc:
         return _summary(None, None, error=str(exc))
 
     n_before = len(out["qa"])
     try:
-        manifest = write_run(out, cfg.output, config=raw)
+        # Retry persistence once after a direct KeyboardInterrupt from a library
+        # caller. The CLI defers its first SIGINT and bypasses this on forced exit.
+        try:
+            manifest = write_run(out, cfg.output, config=raw, control=control)
+        except KeyboardInterrupt:
+            control.request_cancel()
+            out["cancelled"] = True
+            emit(
+                {
+                    "event": "run_cancelled",
+                    "variable": None,
+                    "message": "Saving completed variables after interruption.",
+                }
+            )
+            manifest = write_run(out, cfg.output, config=raw, control=control)
+        out["cancelled"] = out.get("cancelled", False) or control.cancelled
+        if out["cancelled"]:
+            saved = json.loads(manifest.read_text(encoding="utf-8"))
+            if saved.get("status") != "cancelled":
+                saved["status"] = "cancelled"
+                manifest.write_text(json.dumps(saved, indent=2), encoding="utf-8")
     except OSError as exc:
-        return _summary(out, None, error=f"Cannot create the output folder: {exc}")
+        out["cancelled"] = out.get("cancelled", False) or control.cancelled
+        return _summary(out, None, error=f"Cannot save the run outputs: {exc}")
 
     for check in out["qa"][n_before:]:  # failures raised while writing
         emit(

@@ -188,8 +188,8 @@ def summarize(
     period_txt = f"{period[0]}..{period[1]}" if period else "the full common period"
     deviation = {
         metric: {
-            "raw": float((group["raw"] - group["ideal"]).abs().mean()),
-            "corrected": float((group["corrected"] - group["ideal"]).abs().mean()),
+            "raw": _mean_abs_diff(group["raw"], group["ideal"]),
+            "corrected": _mean_abs_diff(group["corrected"], group["ideal"]),
         }
         for metric, group in table.groupby("metric", sort=False)
     }
@@ -199,7 +199,14 @@ def summarize(
         return f"{d['raw']:.3g} -> {d['corrected']:.3g}" if d else "n/a"
 
     mean_bias = table[table["metric"] == "mean_bias"]
-    not_improved = sorted(mean_bias.loc[mean_bias["improved"].eq(False), "station"])
+    # `improved` is None where a score could not be computed: only False counts.
+    not_improved = sorted(
+        str(s)
+        for s, flag in zip(
+            mean_bias["station"].tolist(), mean_bias["improved"].tolist()
+        )
+        if flag is False
+    )
     scores = f"|mean bias| {arrow('mean_bias')}, qq_rmse {arrow('qq_rmse')}, rmse {arrow('rmse')}"
     context = {
         "variable": name,
@@ -228,6 +235,13 @@ def summarize(
                 context=context,
             )
         )
+
+
+def _mean_abs_diff(a: pd.Series | pd.DataFrame, b: pd.Series | pd.DataFrame) -> float:
+    """Mean |a - b| over the stations where both are defined (NaN if none)."""
+    d = np.abs(np.asarray(a, dtype=float).ravel() - np.asarray(b, dtype=float).ravel())
+    d = d[np.isfinite(d)]
+    return float(d.mean()) if d.size else float("nan")
 
 
 def _first(names: list[str], n: int = 20) -> str:

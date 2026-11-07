@@ -64,6 +64,7 @@ def grid_config(toy_config: dict, toy_paths: dict[str, Path]) -> dict:
         "var_map": {"precip": "pr", "tmax": "tasmax"},
         "units": {"precip": "mm d-1", "tmax": "degC"},
         "block_size": 100,
+        "workers": 1,  # Parallel scheduling is exercised separately.
     }
     cfg["periods"] = {"calibration": ["2000", "2012"], "validation": ["2013", "2020"]}
     cfg["correction"] = {
