@@ -1,0 +1,48 @@
+{
+  "stations": {
+    "metadata": "../data/toy/weather_stations.csv",
+    "data_dir": "../data/toy/weather",
+    "file_pattern": "{id}.csv"
+  },
+  "variables": [
+    "precip",
+    "tmax"
+  ],
+  "model": {
+    "hist": "../data/toy/model_hist_{var}.nc",
+    "sim": "../data/toy/model_sim_{var}.nc",
+    "var_map": {
+      "precip": "pr",
+      "tmax": "tasmax",
+      "tmin": "tasmin"
+    },
+    "lat_name": "auto",
+    "lon_name": "auto",
+    "time_name": "auto",
+    "search_radius": 1
+  },
+  "periods": {
+    "calibration": [
+      "2000",
+      "2012"
+    ],
+    "validation": [
+      "2013",
+      "2020"
+    ],
+    "min_coverage": 0.8
+  },
+  "correction": {
+    "tmax": {
+      "group": "dayofyear",
+      "window": 15
+    }
+  },
+  "output": {
+    "path": "../outputs",
+    "formats": [
+      "netcdf",
+      "csv"
+    ]
+  }
+}

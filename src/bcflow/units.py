@@ -15,6 +15,8 @@ xclim), so 1 kg m-2 s-1 = 1 mm s-1 = 86400 mm d-1.
 
 from __future__ import annotations
 
+from typing import cast
+
 import pint
 import xarray as xr
 from xsdba.units import convert_units_to, str2pint, units
@@ -40,7 +42,9 @@ def _via_water_density(da: xr.DataArray, src: str, target: str) -> xr.DataArray:
     raise pint.DimensionalityError(src, target)
 
 
-def to_units(da: xr.DataArray, target: str, qa: list[QACheck], *, label: str) -> tuple[xr.DataArray, str | None]:
+def to_units(
+    da: xr.DataArray, target: str, qa: list[QACheck], *, label: str
+) -> tuple[xr.DataArray, str | None]:
     """Return (`da` in `target` units, the source unit if a conversion happened else None).
 
     - no 'units' attribute  -> warn, assume it is already in `target`
@@ -49,27 +53,31 @@ def to_units(da: xr.DataArray, target: str, qa: list[QACheck], *, label: str) ->
     """
     src = da.attrs.get("units", "")
     if not src:
-        qa.append(QACheck(
-            name=f"units:{label}:missing",
-            status="warn",
-            message=f"{label} has no 'units' attribute; assuming it is already in '{target}'.",
-            context={"variable": label.split(":")[0], "assumed": target},
-        ))
+        qa.append(
+            QACheck(
+                name=f"units:{label}:missing",
+                status="warn",
+                message=f"{label} has no 'units' attribute; assuming it is already in '{target}'.",
+                context={"variable": label.split(":")[0], "assumed": target},
+            )
+        )
         return da.assign_attrs(units=target), None
 
     try:
         try:
-            out = convert_units_to(da, target)
+            out = cast(xr.DataArray, convert_units_to(da, target))
         except pint.DimensionalityError:
             out = _via_water_density(da, src, target)
         same = str2pint(src).units == str2pint(target).units
     except pint.PintError as exc:  # incompatible dimensions, or an unknown unit string
-        qa.append(QACheck(
-            name=f"units:{label}:incompatible",
-            status="fail",
-            message=f"Cannot convert {label} from '{src}' to '{target}': {exc}",
-            context={"variable": label.split(":")[0], "from": src, "to": target},
-        ))
+        qa.append(
+            QACheck(
+                name=f"units:{label}:incompatible",
+                status="fail",
+                message=f"Cannot convert {label} from '{src}' to '{target}': {exc}",
+                context={"variable": label.split(":")[0], "from": src, "to": target},
+            )
+        )
         raise ValueError(
             f"Cannot convert {label} from {src!r} to {target!r} -- see QACheck 'units:{label}:incompatible'."
         ) from None
@@ -94,24 +102,28 @@ def harmonize(
     """
     target = declared or hist.attrs.get("units") or sim.attrs.get("units") or ""
     if not target:
-        qa.append(QACheck(
-            name=f"units:{name}:unknown",
-            status="warn",
-            message=f"No units declared for '{name}' and none found in hist/sim; unit checks skipped.",
-            context={"variable": name},
-        ))
+        qa.append(
+            QACheck(
+                name=f"units:{name}:unknown",
+                status="warn",
+                message=f"No units declared for '{name}' and none found in hist/sim; unit checks skipped.",
+                context={"variable": name},
+            )
+        )
         return ref, hist, sim, ""
 
     if not declared:
-        qa.append(QACheck(
-            name=f"units:{name}:undeclared",
-            status="warn",
-            message=(
-                f"'units' is not set for '{name}'; using hist's units '{target}' and assuming "
-                "the station data is in the same units. Set 'units' in the config to be explicit."
-            ),
-            context={"variable": name, "assumed": target},
-        ))
+        qa.append(
+            QACheck(
+                name=f"units:{name}:undeclared",
+                status="warn",
+                message=(
+                    f"'units' is not set for '{name}'; using hist's units '{target}' and assuming "
+                    "the station data is in the same units. Set 'units' in the config to be explicit."
+                ),
+                context={"variable": name, "assumed": target},
+            )
+        )
         ref = ref.assign_attrs(units=target)
 
     converted: dict[str, str] = {}
@@ -127,10 +139,12 @@ def harmonize(
         message = f"Units for '{name}': converted {detail} to '{target}'."
     else:
         message = f"Units for '{name}': all inputs already in '{target}'."
-    qa.append(QACheck(
-        name=f"units:{name}:summary",
-        status="pass",
-        message=message,
-        context={"variable": name, "units": target, "converted": converted},
-    ))
+    qa.append(
+        QACheck(
+            name=f"units:{name}:summary",
+            status="pass",
+            message=message,
+            context={"variable": name, "units": target, "converted": converted},
+        )
+    )
     return out[0], out[1], out[2], target

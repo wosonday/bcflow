@@ -20,6 +20,11 @@ write_run() is the single entry point. On-disk layout of one run:
                              'period' label per day (+ hist_eval.csv, long format:
                              time, station, period, obs, raw, corrected)
 
+With a gridded reference, scen.nc and hist_eval.nc are (time, lat, lon) on the
+reference grid (cells without data are NaN), written a year at a time so a
+large grid never has to sit in memory as a full cube; their CSVs are long
+format with lat/lon columns and only the corrected cells.
+
 qa.json is written once per run, not per variable: run_pipeline() collects
 the checks of every variable into ONE shared list, so a per-variable copy
 would repeat the other variables' checks in each folder.
@@ -39,12 +44,16 @@ import json
 from datetime import datetime
 from pathlib import Path
 
+import netCDF4
+import numpy as np
 import pandas as pd
 import xarray as xr
+from xarray.coding.times import encode_cf_datetime
 
 from ._version import bcflow_version
 from .config_schema import OutputConfig
 from .qa import QACheck
+from .regrid import TargetGrid
 
 MANIFEST_SCHEMA_VERSION = 1
 _EXTENSIONS = {"netcdf": "nc", "csv": "csv"}
@@ -101,6 +110,117 @@ def _write_hist_eval(
     return paths
 
 
+_CHUNK_DAYS = 365  # time steps written at once for gridded output
+
+
+def _write_grid_netcdf(
+    variables: dict[str, xr.DataArray], grid: TargetGrid, path: Path
+) -> Path:
+    """(time, station) arrays of grid cells -> one (time, lat, lon) NetCDF file."""
+    first = next(iter(variables.values()))
+    ids = grid.ids
+    num, units, calendar = encode_cf_datetime(
+        first["time"].values, "days since 1850-01-01", first["time"].dt.calendar
+    )
+    nt, nlat, nlon = first.sizes["time"], grid.lat.size, grid.lon.size
+    with netCDF4.Dataset(path, "w") as nc:
+        nc.createDimension("time", None)
+        nc.createDimension("lat", nlat)
+        nc.createDimension("lon", nlon)
+        t = nc.createVariable("time", "f8", ("time",))
+        t.setncatts({"units": units, "calendar": calendar, "standard_name": "time"})
+        t[:] = num
+        for name, axis, unit in (
+            ("lat", grid.lat, "degrees_north"),
+            ("lon", grid.lon, "degrees_east"),
+        ):
+            v = nc.createVariable(name, "f8", (name,))
+            v.setncatts(
+                {
+                    "units": unit,
+                    "standard_name": "latitude" if name == "lat" else "longitude",
+                }
+            )
+            v[:] = axis
+        if "period" in first.coords:
+            p = nc.createVariable("period", str, ("time",))
+            p[:] = np.asarray(first["period"].values, dtype=object)
+        for name, da in variables.items():
+            values = da.sel(station=ids).transpose("time", "station").values
+            v = nc.createVariable(
+                name,
+                "f4",
+                ("time", "lat", "lon"),
+                zlib=True,
+                complevel=4,
+                fill_value=np.float32(np.nan),
+                chunksizes=(min(_CHUNK_DAYS, max(nt, 1)), nlat, nlon),
+            )
+            if da.attrs.get("units"):
+                v.units = da.attrs["units"]
+            for a in range(0, nt, _CHUNK_DAYS):
+                b = min(a + _CHUNK_DAYS, nt)
+                cube = np.full((b - a, nlat, nlon), np.nan, dtype=np.float32)
+                cube[:, grid.iy, grid.ix] = values[a:b]
+                v[a:b] = cube
+    return path
+
+
+def _write_grid_csv(
+    variables: dict[str, xr.DataArray], grid: TargetGrid, path: Path
+) -> Path:
+    """Long CSV: time, lat, lon[, period], one column per variable; corrected cells only."""
+    first = next(iter(variables.values()))
+    ids = grid.ids
+    columns = {
+        n: da.sel(station=ids).transpose("time", "station").values
+        for n, da in variables.items()
+    }
+    times = pd.Index(first["time"].values).astype(str)
+    period = first["period"].values if "period" in first.coords else None
+    n_cells = len(ids)
+    with path.open("w", encoding="utf-8", newline="") as f:
+        for a in range(0, first.sizes["time"], _CHUNK_DAYS):
+            b = min(a + _CHUNK_DAYS, first.sizes["time"])
+            df = pd.DataFrame(
+                {
+                    "time": np.repeat(times[a:b], n_cells),
+                    "lat": np.tile(grid.point_lat, b - a),
+                    "lon": np.tile(grid.point_lon, b - a),
+                }
+            )
+            if period is not None:
+                df.insert(3, "period", np.repeat(period[a:b], n_cells))
+            for n, values in columns.items():
+                df[n] = values[a:b].ravel()
+            df = df.dropna(subset=list(columns), how="all")
+            df.to_csv(f, index=False, header=(a == 0))
+    return path
+
+
+def _write_grid(
+    scen: xr.DataArray,
+    hist_eval: xr.Dataset | None,
+    grid: TargetGrid,
+    var_dir: Path,
+    var_name: str,
+    formats: list[str],
+) -> tuple[dict[str, Path], dict[str, Path] | None]:
+    writers = {"netcdf": _write_grid_netcdf, "csv": _write_grid_csv}
+    scen_paths, eval_paths = {}, {} if hist_eval is not None else None
+    for fmt in formats:
+        if fmt not in writers:
+            raise ValueError(
+                f"Unsupported format: {fmt!r}. Valid formats: {sorted(writers)}."
+            )
+        ext = _EXTENSIONS[fmt]
+        scen_paths[fmt] = writers[fmt]({var_name: scen}, grid, var_dir / f"scen.{ext}")
+        if hist_eval is not None and eval_paths is not None:
+            data = {n: hist_eval[n] for n in ("obs", "raw", "corrected")}
+            eval_paths[fmt] = writers[fmt](data, grid, var_dir / f"hist_eval.{ext}")
+    return scen_paths, eval_paths
+
+
 def write_result(
     scen: xr.DataArray,
     adj,
@@ -110,10 +230,27 @@ def write_result(
     formats: list[str],
     evaluation: pd.DataFrame | None = None,
     hist_eval: xr.Dataset | None = None,
+    grid: TargetGrid | None = None,
 ) -> dict:
     """Write one variable's results under run_dir/<var_name>/. Returns the written paths."""
     var_dir = run_dir / var_name
     var_dir.mkdir(parents=True, exist_ok=True)
+
+    if grid is not None:
+        scen_paths, hist_eval_paths = _write_grid(
+            scen, hist_eval, grid, var_dir, var_name, formats
+        )
+        adj_path = _write_netcdf(adj.ds, var_dir / "adj.nc")
+        eval_path = None
+        if evaluation is not None:
+            eval_path = var_dir / "evaluation.csv"
+            evaluation.to_csv(eval_path, index=False)
+        return {
+            "scen": scen_paths,
+            "adj": adj_path,
+            "evaluation": eval_path,
+            "hist_eval": hist_eval_paths,
+        }
 
     scen_paths: dict[str, Path] = {}
     for fmt in formats:
@@ -247,9 +384,10 @@ def write_run(
                 res["adj"],
                 run_dir=run_dir,
                 var_name=name,
-                formats=output_cfg.formats,
+                formats=[str(f) for f in output_cfg.formats],
                 evaluation=res.get("evaluation"),
                 hist_eval=res.get("hist_eval"),
+                grid=res.get("grid"),
             )
         except Exception as exc:  # isolates write errors, per variable
             out["qa"].append(

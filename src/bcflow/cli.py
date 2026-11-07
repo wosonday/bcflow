@@ -14,7 +14,7 @@ object per line -- progress events, the last one {"event": "run_finished", ...}
 and tracebacks go to stderr.
 
 Exit codes:
-    0  success (run: no failed check; validate: config valid)
+    0  success (run: no failed check; validate: config valid, warnings allowed)
     1  finished with failures (run: a variable failed; validate: config invalid)
     2  could not start (unreadable config, bad 'output' section, path not found)
 """
@@ -51,6 +51,7 @@ def _print_pretty(obj) -> None:
 
 # --- commands ---------------------------------------------------------------
 
+
 def _print_run_report(summary: dict) -> None:
     if summary["qa"]:
         print("=" * 70)
@@ -66,7 +67,9 @@ def _print_run_report(summary: dict) -> None:
             print(f"{name}: {'OK' if status == 'ok' else 'FAILED (see QA report)'}")
         c = summary["counts"]
         n_ok = sum(1 for s in summary["variables"].values() if s == "ok")
-        print(f"\nTotal: {c['fail']} fail, {c['warn']} warn, {n_ok}/{len(summary['variables'])} variables succeeded.")
+        print(
+            f"\nTotal: {c['fail']} fail, {c['warn']} warn, {n_ok}/{len(summary['variables'])} variables succeeded."
+        )
     if summary["run_dir"]:
         print(f"Outputs written to: {summary['run_dir']}")
     if summary["error"]:
@@ -87,13 +90,19 @@ def _cmd_validate(args) -> int:
     result = service.validate_config_file(args.config)
     if args.json:
         _emit_json(result)
-    elif result["valid"]:
-        print(f"[PASS] {args.config}: valid ({len(result['variables'])} variables).")
-    else:
-        for e in result["errors"]:
-            where = ".".join(str(x) for x in e["loc"])
-            who = f"{e['variable']}: " if e["variable"] else ""
-            print(f"[FAIL] {who}{where + ': ' if where else ''}{e['message']}")
+        return 0 if result["valid"] else 1
+    for e in result["errors"]:
+        where = ".".join(str(x) for x in e["loc"])
+        who = f"{e['variable']}: " if e["variable"] else ""
+        print(f"[FAIL] {who}{where + ': ' if where else ''}{e['message']}")
+    for w in result.get("warnings", []):
+        print(f"[WARN] {w['variable']}: {w['message']}")
+    if result["valid"]:
+        n_warn = len(result.get("warnings", []))
+        print(
+            f"[PASS] {args.config}: valid ({len(result['variables'])} variables"
+            + (f", {n_warn} warning(s))." if n_warn else ").")
+        )
     return 0 if result["valid"] else 1
 
 
@@ -135,21 +144,29 @@ _COMMANDS = {
 
 
 def _build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="bcflow", description="Config-driven bias correction built on xsdba.")
-    parser.add_argument("--version", action="version", version=f"%(prog)s {service.bcflow_version()}")
+    parser = argparse.ArgumentParser(
+        prog="bcflow", description="Config-driven bias correction built on xsdba."
+    )
+    parser.add_argument(
+        "--version", action="version", version=f"%(prog)s {service.bcflow_version()}"
+    )
     sub = parser.add_subparsers(dest="command", required=True, metavar="COMMAND")
 
     json_help = "machine-readable JSON on stdout (for the desktop app)"
     run = sub.add_parser("run", help="run the pipeline and write the outputs")
-    run.add_argument("config", type=Path, help="path to config.yaml")
+    run.add_argument("config", type=Path, help="path to a YAML or JSON config file")
     run.add_argument("--json", action="store_true", help=json_help)
 
     validate = sub.add_parser("validate", help="check a config without running it")
-    validate.add_argument("config", type=Path, help="path to config.yaml")
+    validate.add_argument(
+        "config", type=Path, help="path to a YAML or JSON config file"
+    )
     validate.add_argument("--json", action="store_true", help=json_help)
 
     inspect = sub.add_parser("inspect", help="describe a data file or folder")
-    inspect.add_argument("path", type=Path, help=".nc, .zarr, .csv or a folder of station .csv files")
+    inspect.add_argument(
+        "path", type=Path, help=".nc, .zarr, .csv or a folder of station .csv files"
+    )
     inspect.add_argument("--json", action="store_true", help=json_help)
 
     methods = sub.add_parser("methods", help="list the available correction methods")

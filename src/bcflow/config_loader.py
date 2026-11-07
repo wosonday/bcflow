@@ -1,4 +1,4 @@
-"""config_loader.py -- read config.yaml from disk, resolve relative paths.
+"""config_loader.py -- read a YAML or JSON config from disk, resolve relative paths.
 
 Split from config_schema.py: schema.py only answers "is this dict shaped
 like a valid PipelineConfig" (pure, no I/O); this module answers "find the
@@ -7,6 +7,7 @@ file, read it, fix up its paths, then hand off to the caller".
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any
 
@@ -33,7 +34,7 @@ def _resolve_paths(node: Any, base: Path) -> Any:
 
 
 def load_config_file(path: str | Path) -> dict:
-    """Read config.yaml and resolve every relative path against the file's
+    """Read a YAML or JSON config and resolve every relative path against the file's
     own directory (not the cwd).
 
     Returns the raw dict; validating it is config_schema.load_config()'s job.
@@ -44,10 +45,25 @@ def load_config_file(path: str | Path) -> dict:
     if not cfg_path.is_file():
         raise ValueError(f"Config file not found: {cfg_path}")
 
-    try:
-        raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
-    except yaml.YAMLError as exc:
-        raise ValueError(f"{cfg_path} is not valid YAML: {exc}") from exc
+    suffix: str = cfg_path.suffix.lower()
+
+    if suffix not in {".yaml", ".yml", ".json"}:
+        raise ValueError(
+            f"Unsupported config format {suffix!r}; use .yaml, .yml, or .json."
+        )
+
+    text = cfg_path.read_text(encoding="utf-8")
+
+    if suffix == ".json":
+        try:
+            raw = json.loads(text)
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"{cfg_path} is not valid JSON: {exc}") from exc
+    else:
+        try:
+            raw = yaml.safe_load(text)
+        except yaml.YAMLError as exc:
+            raise ValueError(f"{cfg_path} is not valid YAML: {exc}") from exc
 
     if not isinstance(raw, dict):
         raise ValueError(f"{cfg_path} must be a mapping (key: value) at the top level.")

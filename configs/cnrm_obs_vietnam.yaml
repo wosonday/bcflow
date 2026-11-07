@@ -1,0 +1,39 @@
+# Real data: CNRM-ESM2-1 (CMIP6, 'gr' grid ~1.4 deg) corrected against the
+# OBS.Vietnam gridded observations (0.1 deg, 1980-2014).
+# Paths are relative to this file's folder (configs/), hence ../data/.
+#
+# Run:  uv run bcflow validate configs/cnrm_obs_vietnam.yaml
+#       uv run bcflow run configs/cnrm_obs_vietnam.yaml
+# The whole country is ~2800 land cells: expect roughly 10 minutes per
+# variable on a 2-CPU machine. Uncomment `region` to try one basin first.
+
+grid:
+  path: ../data/OBS.Vietnam.1980-2014.nc
+  var_map: { precip: pr, tmax: tasmax, tmin: tasmin }
+  # The file's units attribute is CDO's placeholder "var_unit": state the real units.
+  units: { precip: "mm d-1", tmax: degC, tmin: degC }
+  # region: { lat: [20.0, 21.5], lon: [105.0, 107.0] }   # e.g. the Red River delta
+  block_size: 500            # cells corrected together; lower it if memory runs short
+
+variables: [precip, tmax, tmin]
+
+model:
+  hist: ../data/GCMs/CNRM-ESM2-1_historical_r1i1p1f2_{var}_gr.nc
+  sim: ../data/GCMs/CNRM-ESM2-1_ssp245_r1i1p1f2_{var}_gr.nc
+  var_map: { precip: pr, tmax: tasmax, tmin: tasmin }
+
+periods:
+  calibration: ["1980", "2004"]   # 25 years: a warning recommends >= 30
+  validation: ["2005", "2014"]
+  min_coverage: 0.8
+
+# Defaults: QDM grouped by month; precip regridded conservatively with
+# adapt_freq at 1 mm/d, tmax/tmin regridded bilinearly. Override per variable,
+# e.g. (dayofyear with a 31-day window is smoother but several times slower):
+# correction:
+#   tmax: { group: dayofyear, window: 31, regrid: bicubic }
+#   precip: { regrid: idw, regrid_params: { neighbours: 4, power: 2 } }
+
+output:
+  path: ../outputs/cnrm_obs_vietnam
+  formats: [netcdf]

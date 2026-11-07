@@ -5,6 +5,8 @@ files serve both tools:
 
     stations:   metadata CSV `id, name, lat, lon[, elev]` + one CSV per
                 station (`file_pattern`) with `date, precip, tmax, ...`
+    grid:       OR gridded observations (NetCDF/Zarr) as the reference; the
+                model is then regridded onto that grid (regrid.py)
     variables:  which swatprep variables to correct
     model:      GCM files for hist and sim; `{var}` in a path is replaced by
                 the variable's name in `var_map` (one file per variable, as
@@ -67,8 +69,50 @@ class StationsConfig(BaseModel):
     @classmethod
     def _has_placeholder(cls, value: str) -> str:
         if "{id}" not in value and "{name}" not in value:
-            raise ValueError("file_pattern must contain {id} or {name}, e.g. '{id}.csv'.")
+            raise ValueError(
+                "file_pattern must contain {id} or {name}, e.g. '{id}.csv'."
+            )
         return value
+
+
+# Must list the same names as regrid.METHODS (guarded by a test).
+RegridMethod = Literal["nearest", "idw", "bilinear", "bicubic", "conservative", "patch"]
+
+
+class RegionConfig(BaseModel):
+    """A lat/lon box that limits a gridded reference, e.g. to one basin."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    lat: tuple[float, float]
+    lon: tuple[float, float]
+
+    @model_validator(mode="after")
+    def _ordered(self) -> RegionConfig:
+        for name in ("lat", "lon"):
+            lo, hi = getattr(self, name)
+            if lo >= hi:
+                raise ValueError(f"region.{name}: min {lo} must be below max {hi}.")
+        return self
+
+
+class GridReferenceConfig(BaseModel):
+    """Gridded observations used as the reference instead of stations."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    path: str  # one NetCDF/Zarr holding every variable
+    var_map: dict[VariableName, str]  # swatprep name -> name in the file
+    # Units of a variable when the file's own 'units' attribute is missing or
+    # wrong (e.g. CDO's placeholder "var_unit"): {precip: "mm d-1", tmax: degC}.
+    units: dict[VariableName, str] = Field(default_factory=dict)
+    lat_name: str = "auto"
+    lon_name: str = "auto"
+    time_name: str = "auto"
+    region: RegionConfig | None = None
+    block_size: int = Field(
+        default=500, ge=1
+    )  # cells corrected together; lower it to save memory
 
 
 class ModelConfig(BaseModel):
@@ -82,7 +126,11 @@ class ModelConfig(BaseModel):
     lat_name: str = "auto"
     lon_name: str = "auto"
     time_name: str = "auto"
-    search_radius: int = Field(1, ge=0, le=5)  # cells; used when the nearest cell is empty
+    search_radius: int = Field(
+        1, ge=0, le=5
+    )  # cells; used when the nearest cell is empty
+    # Units of a variable when the model file's 'units' attribute is missing or wrong.
+    units: dict[VariableName, str] = Field(default_factory=dict)
 
     def path(self, which: Literal["hist", "sim"], variable: str) -> str:
         """File of `variable` for the hist or sim run."""
@@ -101,6 +149,8 @@ class CorrectionConfig(BaseModel):
     adapt_freq_thresh: str | None = None
     train_params: dict[str, Any] | None = None
     adjust_params: dict[str, Any] | None = None
+    regrid: RegridMethod | None = None  # only used with a gridded reference
+    regrid_params: dict[str, Any] | None = None  # e.g. idw: {neighbours: 4, power: 2}
 
 
 def _span(period: tuple[str, str], field: str) -> tuple[pd.Timestamp, pd.Timestamp]:
@@ -112,7 +162,9 @@ def _span(period: tuple[str, str], field: str) -> tuple[pd.Timestamp, pd.Timesta
             f"periods.{field}: invalid date in {list(period)}; use e.g. '2000' or '2000-01-31'."
         ) from None
     if start > end:
-        raise ValueError(f"periods.{field}: start {period[0]!r} is after end {period[1]!r}.")
+        raise ValueError(
+            f"periods.{field}: start {period[0]!r} is after end {period[1]!r}."
+        )
     return start, end
 
 
@@ -122,12 +174,16 @@ class PeriodsConfig(BaseModel):
     calibration: data used to TRAIN (ref and hist). Default: all common data.
     validation:  held-out data used only to EVALUATE before/after; must not
                  overlap calibration. Without it, evaluation is in-sample.
+    min_coverage: share of calibration days a station needs with a valid
+                 observation; stations below it are reported (coverage.py)
+                 but still corrected.
     """
 
     model_config = ConfigDict(extra="forbid")
 
     calibration: tuple[DateText, DateText] | None = None
     validation: tuple[DateText, DateText] | None = None
+    min_coverage: float = Field(default=0.8, gt=0, le=1)
 
     @model_validator(mode="after")
     def _ordered_and_disjoint(self) -> PeriodsConfig:
@@ -136,7 +192,11 @@ class PeriodsConfig(BaseModel):
                 "periods: validation requires calibration -- otherwise training would use "
                 "the validation years too and the check would not be independent."
             )
-        spans = {f: _span(getattr(self, f), f) for f in ("calibration", "validation") if getattr(self, f)}
+        spans = {
+            f: _span(getattr(self, f), f)
+            for f in ("calibration", "validation")
+            if getattr(self, f)
+        }
         if len(spans) == 2:
             (c0, c1), (v0, v1) = spans["calibration"], spans["validation"]
             if c0 <= v1 and v0 <= c1:
@@ -163,13 +223,16 @@ class OutputConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     path: str = "outputs"
-    formats: list[OutputFormat] = Field(default_factory=lambda: ["netcdf"], min_length=1)
+    formats: list[OutputFormat] = Field(
+        default_factory=lambda: ["netcdf"], min_length=1
+    )
 
 
 class PipelineConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    stations: StationsConfig
+    stations: StationsConfig | None = None
+    grid: GridReferenceConfig | None = None
     variables: list[VariableName] = Field(min_length=1)
     model: ModelConfig
     periods: PeriodsConfig = Field(default_factory=PeriodsConfig)
@@ -178,6 +241,18 @@ class PipelineConfig(BaseModel):
 
     @model_validator(mode="after")
     def _consistent(self) -> PipelineConfig:
+        if (self.stations is None) == (self.grid is None):
+            raise ValueError(
+                "Set exactly one reference: 'stations' (station CSV files) or 'grid' "
+                "(gridded observations)."
+            )
+        if self.grid is not None:
+            missing = [v for v in self.variables if v not in self.grid.var_map]
+            if missing:
+                raise ValueError(
+                    f"grid.var_map has no entry for {missing}; add e.g. "
+                    "{precip: pr, tmax: tasmax, tmin: tasmin}."
+                )
         duplicated = sorted({v for v in self.variables if self.variables.count(v) > 1})
         if duplicated:
             raise ValueError(f"variables: listed more than once: {duplicated}.")
@@ -201,7 +276,9 @@ class PipelineConfig(BaseModel):
     def spec(self, variable: str) -> VariableSpec:
         """Defaults of `variable` merged with its `correction:` overrides."""
         override = self.correction.get(variable)  # type: ignore[call-overload]
-        return resolve(variable, override.model_dump(exclude_none=True) if override else None)
+        return resolve(
+            variable, override.model_dump(exclude_none=True) if override else None
+        )
 
 
 def load_config(raw: dict) -> PipelineConfig:

@@ -1,8 +1,8 @@
 # bcflow
 
 Pipeline hiệu chỉnh sai số khí hậu/thủy văn (bias correction), xây trên
-[xsdba](https://github.com/Ouranosinc/xsdba), điều khiển bằng `config.yaml`
-thay vì sửa code Python trực tiếp.
+[xsdba](https://github.com/Ouranosinc/xsdba), điều khiển bằng một file cấu hình
+YAML hoặc JSON thay vì sửa code Python trực tiếp.
 
 ## Ý tưởng thiết kế
 
@@ -27,12 +27,22 @@ uv sync
 ## Chạy
 
 ```bash
-uv run python scripts/make_toy_data.py          # sinh dữ liệu mẫu vào data/toy/
-uv run bcflow validate configs/example_toy.yaml # kiểm tra config, không chạy
-uv run bcflow run configs/example_toy.yaml      # chạy và ghi kết quả vào outputs/
-uv run bcflow inspect data/toy/model_hist_pr.nc # xem biến, đơn vị, khoảng thời gian của file
-uv run bcflow methods                           # các phương pháp hiệu chỉnh có sẵn
+uv run python scripts/make_toy_data.py           # sinh dữ liệu mẫu vào data/toy/
+uv run bcflow validate configs/example_toy.yaml  # kiểm tra config, không chạy
+uv run bcflow run configs/example_toy.yaml       # tham chiếu là trạm
+uv run bcflow run configs/example_toy.json       # cùng config, dạng JSON
+uv run bcflow run configs/example_grid.yaml      # tham chiếu là lưới quan trắc
+uv run bcflow inspect data/toy/model_hist_pr.nc  # xem biến, đơn vị, khoảng thời gian của file
+uv run bcflow methods                            # các phương pháp hiệu chỉnh có sẵn
 ```
+
+Config mẫu trong `configs/`:
+
+| File                          | Tham chiếu               | Dữ liệu                                         |
+| ----------------------------- | ------------------------ | ----------------------------------------------- |
+| `example_toy.yaml` / `.json`  | trạm (bố cục swatprep)   | toy, sinh bằng `scripts/make_toy_data.py`       |
+| `example_grid.yaml`           | lưới quan trắc 0,5°      | toy, sinh bằng `scripts/make_toy_data.py`       |
+| `cnrm_obs_vietnam.yaml`       | lưới OBS.Vietnam 0,1°    | thật: `data/OBS.Vietnam.1980-2014.nc` + CNRM    |
 
 ## Dữ liệu đầu vào
 
@@ -51,27 +61,53 @@ wind m/s, solar MJ/m²/ngày, humidity phân số 0–1. Dữ liệu mô hình (
 
 ```yaml
 stations:
-  metadata: data/weather_stations.csv
-  data_dir: data/weather
-  file_pattern: "{id}.csv"          # hoặc "{name}.csv"
-variables: [precip, tmax, tmin]     # thêm wind, solar, humidity nếu có
+    metadata: data/weather_stations.csv
+    data_dir: data/weather
+    file_pattern: "{id}.csv" # hoặc "{name}.csv"
+variables: [precip, tmax, tmin] # thêm wind, solar, humidity nếu có
 model:
-  hist: data/GCMs/CNRM-ESM2-1_historical_r1i1p1f2_{var}_gr.nc   # {var} -> tên trong var_map
-  sim: data/GCMs/CNRM-ESM2-1_ssp245_r1i1p1f2_{var}_gr.nc        # không có {var}: một file chứa mọi biến
-  var_map: { precip: pr, tmax: tasmax, tmin: tasmin }
-  lat_name: auto
-  lon_name: auto
-  time_name: auto
-  search_radius: 1                  # số ô lưới tìm quanh khi ô gần nhất không có dữ liệu
+    hist: data/GCMs/CNRM-ESM2-1_historical_r1i1p1f2_{var}_gr.nc # {var} -> tên trong var_map
+    sim: data/GCMs/CNRM-ESM2-1_ssp245_r1i1p1f2_{var}_gr.nc # không có {var}: một file chứa mọi biến
+    var_map: { precip: pr, tmax: tasmax, tmin: tasmin }
+    lat_name: auto
+    lon_name: auto
+    time_name: auto
+    search_radius: 1 # số ô lưới tìm quanh khi ô gần nhất không có dữ liệu
 periods:
-  calibration: ["1980", "2004"]
-  validation: ["2005", "2014"]
-correction:                         # tùy chọn: ghi đè mặc định của từng biến (variables.py)
-  tmax: { group: dayofyear, window: 31 }   # dayofyear | month | none
+    calibration: ["1980", "2004"] # nên >= 30 năm (chuẩn khí hậu WMO)
+    validation: ["2005", "2014"]
+    min_coverage: 0.8 # tỷ lệ ngày có số liệu tối thiểu của mỗi trạm trong thời kỳ hiệu chuẩn
+correction: # tùy chọn: ghi đè mặc định của từng biến (variables.py)
+    tmax: { group: dayofyear, window: 31 } # dayofyear | month | none
 ```
 
 Mặc định mọi biến dùng Quantile Delta Mapping, nhóm theo tháng; precip thêm
 `adapt_freq` với ngưỡng ngày mưa 1 mm/ngày.
+
+Trạm thiếu số liệu hiệu chuẩn được cảnh báo sớm (`coverage.py`): `bcflow validate`
+chỉ đọc dữ liệu trạm (vài giây, không mở file mô hình) và liệt kê các trạm có tỷ lệ
+ngày hợp lệ dưới `min_coverage`, cùng cảnh báo khi thời kỳ hiệu chuẩn ngắn hơn 30 năm.
+Các trạm này vẫn được hiệu chỉnh; trạm không có ngày nào hợp lệ sẽ cho chuỗi rỗng (NaN).
+
+### Tham chiếu là lưới quan trắc (thay cho `stations:`)
+
+```yaml
+grid:
+    path: data/OBS.Vietnam.1980-2014.nc
+    var_map: { precip: pr, tmax: tasmax, tmin: tasmin }
+    units: { precip: "mm d-1", tmax: degC, tmin: degC } # khi file ghi "var_unit" (CDO)
+    region: { lat: [20.0, 21.5], lon: [105.0, 107.0] } # tùy chọn: chỉ một vùng/lưu vực
+    block_size: 500 # số ô hiệu chỉnh mỗi lượt (giảm nếu thiếu RAM)
+correction:
+    tmax: { regrid: bicubic } # nearest | idw | bilinear | bicubic | conservative | patch
+    precip: { regrid: idw, regrid_params: { neighbours: 4, power: 2 } }
+```
+
+GCM được regrid về lưới tham chiếu (`regrid.py`), rồi mỗi ô được hiệu chỉnh như một
+trạm. Mặc định: precip `conservative` (giữ tổng lượng mưa theo diện tích), các biến
+khác `bilinear`. Kết quả `scen.nc`, `hist_eval.nc` có dạng `(time, lat, lon)` trên lưới
+tham chiếu; ô không có số liệu (biển) để trống. CSV (nếu chọn) ở dạng dài
+`time, lat, lon, giá trị`, chỉ gồm các ô được hiệu chỉnh — file có thể rất lớn.
 
 ## Cấu trúc
 
@@ -79,13 +115,16 @@ Mặc định mọi biến dùng Quantile Delta Mapping, nhóm theo tháng; prec
 src/bcflow/
     qa.py             QACheck — kết quả kiểm tra có cấu trúc
     variables.py      Mặc định hiệu chỉnh cho từng biến swatprep (precip, tmax, ...)
-    config_schema.py  Validate config.yaml bằng pydantic (stations, model, periods, correction, output)
-    config_loader.py  Đọc config.yaml, chuyển đường dẫn tương đối theo vị trí file
+    config_schema.py  Validate config bằng pydantic (stations | grid, model, periods, correction, output)
+    config_loader.py  Đọc config YAML/JSON, chuyển đường dẫn tương đối theo vị trí file
     grouping.py       Grouper của xsdba + tự nhận diện lat/lon
     methods.py        Ánh xạ tên phương pháp -> class xsdba
     extract.py        Ô lưới gần trạm nhất (lưới đều hoặc cong), tìm ô lân cận khi ô trống
     loaders.py        Đọc dữ liệu trạm (bố cục swatprep) + file mô hình NetCDF/Zarr
     timeaxis.py       Đưa trạm và mô hình về một trục thời gian ngày chung
+    coverage.py       Cảnh báo sớm trạm/ô thiếu số liệu hiệu chuẩn, thời kỳ < 30 năm
+    regrid.py         Regrid GCM về lưới quan trắc: nearest, idw, bilinear, bicubic,
+                      conservative, patch
     units.py          Kiểm tra và đổi đơn vị (K -> degC, kg m-2 s-1 -> mm/d)
     evaluate.py       Đánh giá trước/sau hiệu chỉnh, so sánh theo phân phối
     adjust.py         run_variable — mọi bước cho một biến
@@ -98,7 +137,10 @@ scripts/
 tests/
     test_*.py         pytest
 configs/
-    example_toy.yaml  Config mẫu khớp với dữ liệu toy
+    example_toy.yaml       Config mẫu, tham chiếu là trạm (dữ liệu toy)
+    example_toy.json       Cùng config ở dạng JSON
+    example_grid.yaml      Config mẫu, tham chiếu là lưới quan trắc (dữ liệu toy)
+    cnrm_obs_vietnam.yaml  Config cho dữ liệu thật: CNRM-ESM2-1 + OBS.Vietnam
 ```
 
 ## Giao tiếp với frontend (JSON)
@@ -107,13 +149,13 @@ configs/
 Với `--json`, stdout chỉ chứa JSON (thuần ASCII, không phụ thuộc bảng mã của
 Windows); cảnh báo của thư viện và traceback đi ra stderr.
 
-| Lệnh | stdout khi có `--json` | Mã thoát |
-|---|---|---|
-| `bcflow run CONFIG --json` | mỗi dòng một sự kiện JSON; dòng cuối là `run_finished` | 0 thành công, 1 có biến lỗi, 2 không chạy được |
-| `bcflow validate CONFIG --json` | `{"valid", "variables", "errors": [{"variable", "loc", "message"}]}` | 0 hợp lệ, 1 không hợp lệ |
-| `bcflow inspect PATH --json` | biến, chiều, đơn vị, khoảng thời gian của file/thư mục | 0, hoặc 2 kèm `{"error"}` |
-| `bcflow methods --json` | `[{"name", "class", "summary"}]` | 0 |
-| `bcflow schema` | JSON Schema của `config.yaml` | 0 |
+| Lệnh                            | stdout khi có `--json`                                               | Mã thoát                                       |
+| ------------------------------- | -------------------------------------------------------------------- | ---------------------------------------------- |
+| `bcflow run CONFIG --json`      | mỗi dòng một sự kiện JSON; dòng cuối là `run_finished`               | 0 thành công, 1 có biến lỗi, 2 không chạy được |
+| `bcflow validate CONFIG --json` | `{"valid", "variables", "errors": [...], "warnings": [...]}`        | 0 hợp lệ (có thể kèm cảnh báo), 1 không hợp lệ |
+| `bcflow inspect PATH --json`    | biến, chiều, đơn vị, khoảng thời gian của file/thư mục               | 0, hoặc 2 kèm `{"error"}`                      |
+| `bcflow methods --json`         | `[{"name", "class", "summary"}]`                                     | 0                                              |
+| `bcflow schema`                 | JSON Schema của file config                                          | 0                                              |
 
 Các sự kiện của `run`, theo thứ tự:
 
@@ -129,4 +171,5 @@ Các sự kiện của `run`, theo thứ tự:
 Mỗi lần chạy tạo một thư mục `outputs/run_YYYYmmdd_HHMMSS/` gồm `manifest.json`
 (đường dẫn tương đối), `qa.json`, `config.json` và với mỗi biến: `scen.nc`
 (+ `scen.csv`), `adj.nc`, `evaluation.csv`, `hist_eval.nc` (+ `hist_eval.csv`). Cấu trúc `manifest.json` được mô tả
-trong docstring của `writers.py` (`schema_version: 1`).
+trong docstring của `writers.py` (`schema_version: 1`). Với tham chiếu là lưới,
+`scen.nc` và `hist_eval.nc` có dạng `(time, lat, lon)`.

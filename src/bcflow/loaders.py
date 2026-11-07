@@ -18,17 +18,27 @@ an error raised, because an empty array fails far less clearly inside xsdba.
 
 from __future__ import annotations
 
+from collections.abc import Hashable
 from pathlib import Path
+from typing import NoReturn
 
 import numpy as np
 import pandas as pd
 import xarray as xr
+from xsdba.units import str2pint
 
-from .config_schema import ModelConfig, StationsConfig
+from .config_schema import GridReferenceConfig, ModelConfig, StationsConfig, _span
+from .grouping import resolve_latlon_dims
 from .qa import QACheck
+from .regrid import TargetGrid
 
 _REQUIRED_META = ("id", "name", "lat", "lon")
-_META_ALIASES = {"long": "lon", "longitude": "lon", "latitude": "lat", "elevation": "elev"}
+_META_ALIASES = {
+    "long": "lon",
+    "longitude": "lon",
+    "latitude": "lat",
+    "elevation": "elev",
+}
 _TIME_NAMES = ("time", "t", "date", "valid_time")
 
 
@@ -52,15 +62,21 @@ def load_station_metadata(stations: StationsConfig) -> pd.DataFrame:
         meta[col] = meta[col].str.strip()
     for col in ("lat", "lon"):
         values = pd.Series(
-            pd.to_numeric(meta[col].str.strip(), errors="coerce"), index=meta.index, dtype=float
+            pd.to_numeric(meta[col].str.strip(), errors="coerce"),
+            index=meta.index,
+            dtype=float,
         )
         bad = meta.loc[values.isna(), "id"].tolist()
         if bad:
-            raise ValueError(f"{path.name}: {col} is not a number for station(s) {bad[:5]}.")
+            raise ValueError(
+                f"{path.name}: {col} is not a number for station(s) {bad[:5]}."
+            )
         meta[col] = values
     duplicated = sorted(meta.loc[meta["id"].duplicated(), "id"].unique())
     if duplicated:
-        raise ValueError(f"{path.name}: station id(s) listed more than once: {duplicated[:5]}.")
+        raise ValueError(
+            f"{path.name}: station id(s) listed more than once: {duplicated[:5]}."
+        )
     return meta.set_index("id")
 
 
@@ -90,10 +106,20 @@ def load_station_variable(
             continue
         values = np.asarray(pd.to_numeric(df[variable], errors="coerce"), dtype=float)
         index = pd.DatetimeIndex(pd.to_datetime(df["date"]), name="time")
-        series[str(sid)] = pd.Series(values, index=index).groupby(level=0).first().sort_index()
+        series[str(sid)] = (
+            pd.Series(values, index=index).groupby(level=0).first().sort_index()
+        )
 
-    _warn_skipped(qa, variable, "missing_file", no_file, f"no file matching '{stations.file_pattern}'")
-    _warn_skipped(qa, variable, "missing_column", no_column, f"no 'date' or '{variable}' column")
+    _warn_skipped(
+        qa,
+        variable,
+        "missing_file",
+        no_file,
+        f"no file matching '{stations.file_pattern}'",
+    )
+    _warn_skipped(
+        qa, variable, "missing_column", no_column, f"no 'date' or '{variable}' column"
+    )
 
     if not series:
         qa.append(
@@ -150,7 +176,9 @@ def load_station_variable(
     )
 
 
-def _warn_skipped(qa: list[QACheck], variable: str, kind: str, ids: list[str], why: str) -> None:
+def _warn_skipped(
+    qa: list[QACheck], variable: str, kind: str, ids: list[str], why: str
+) -> None:
     if ids:
         qa.append(
             QACheck(
@@ -175,7 +203,9 @@ def _time_dim(da: xr.DataArray, time_name: str) -> str | None:
     return next((available[c] for c in _TIME_NAMES if c in available), None)
 
 
-def load_model_variable(model: ModelConfig, which: str, variable: str, qa: list[QACheck]) -> xr.DataArray:
+def load_model_variable(
+    model: ModelConfig, which: str, variable: str, qa: list[QACheck]
+) -> xr.DataArray:
     """The model field of `variable` from the hist or sim file, time axis named 'time'."""
     path = Path(model.path(which, variable))  # type: ignore[arg-type]
     file_var = model.var_map[variable]  # type: ignore[index]
@@ -201,7 +231,9 @@ def load_model_variable(model: ModelConfig, which: str, variable: str, qa: list[
                 context={"variable": variable, "path": str(path), "available": names},
             )
         )
-        raise ValueError(f"'{file_var}' not in {path.name} -- see QACheck 'model:{label}:missing_variable'.")
+        raise ValueError(
+            f"'{file_var}' not in {path.name} -- see QACheck 'model:{label}:missing_variable'."
+        )
 
     da = ds[file_var]
     time = _time_dim(da, model.time_name)
@@ -217,7 +249,161 @@ def load_model_variable(model: ModelConfig, which: str, variable: str, qa: list[
                 context={"variable": variable, "path": str(path)},
             )
         )
-        raise ValueError(f"No time axis in {path.name} -- see QACheck 'model:{label}:time_not_found'.")
+        raise ValueError(
+            f"No time axis in {path.name} -- see QACheck 'model:{label}:time_not_found'."
+        )
     if time != "time":
         da = da.rename({time: "time"})
-    return da
+    override = model.units.get(variable)  # type: ignore[call-overload]
+    return da.assign_attrs(units=override) if override else da
+
+
+# --- gridded reference ---------------------------------------------------------
+
+
+def open_grid_reference(
+    grid: GridReferenceConfig, variable: str, qa: list[QACheck]
+) -> tuple[xr.DataArray, Hashable, Hashable]:
+    """The reference field (time, lat, lon), opened lazily, cut to `grid.region`.
+
+    Returns (data, lat dim, lon dim). Units come from `grid.units` when set,
+    otherwise from the file, and must be a unit pint understands -- CDO
+    often writes the placeholder "var_unit", which must be overridden.
+    """
+    path = Path(grid.path)
+    label = f"{variable}:ref"
+    file_var = grid.var_map[variable]  # type: ignore[index]
+    if not path.exists():
+        _fail(
+            qa,
+            f"grid:{label}:missing_file",
+            f"Reference grid not found: {path}",
+            variable,
+        )
+    ds = _open(path)
+    if file_var not in ds.data_vars:
+        names = sorted(str(v) for v in ds.data_vars)
+        _fail(
+            qa,
+            f"grid:{label}:missing_variable",
+            f"{path.name} has no variable '{file_var}' (grid.var_map.{variable}). Found: {names}.",
+            variable,
+        )
+    da = ds[file_var]
+    time = _time_dim(da, grid.time_name)
+    if time is None:
+        _fail(
+            qa,
+            f"grid:{label}:time_not_found",
+            f"No time axis in '{file_var}' of {path.name}.",
+            variable,
+        )
+    if time != "time":
+        da = da.rename({time: "time"})
+
+    units = grid.units.get(variable) or da.attrs.get("units", "")  # type: ignore[call-overload]
+    try:
+        str2pint(units)
+    except Exception:  # noqa: BLE001 -- pint raises several error types for bad strings
+        _fail(
+            qa,
+            f"grid:{label}:bad_units",
+            f"'{file_var}' in {path.name} has units {units!r}, which are not a valid unit; "
+            f"set grid.units.{variable} in the config (e.g. 'mm d-1' or 'degC').",
+            variable,
+        )
+    da = da.assign_attrs(units=units)
+
+    lat, lon = resolve_latlon_dims(
+        da, grid.lat_name, grid.lon_name, qa, source_label=label
+    )
+    if da[lat].ndim != 1 or da[lon].ndim != 1:
+        _fail(
+            qa,
+            f"grid:{label}:not_regular",
+            "The reference grid must have 1-D lat and lon.",
+            variable,
+        )
+    lat_dim, lon_dim = da[lat].dims[0], da[lon].dims[0]
+    if grid.region is not None:
+        la, lo = da[lat].values, da[lon].values
+        keep_lat = np.flatnonzero(
+            (la >= grid.region.lat[0]) & (la <= grid.region.lat[1])
+        )
+        keep_lon = np.flatnonzero(
+            (lo >= grid.region.lon[0]) & (lo <= grid.region.lon[1])
+        )
+        if keep_lat.size == 0 or keep_lon.size == 0:
+            _fail(
+                qa,
+                f"grid:{label}:empty_region",
+                "grid.region contains no cell of the grid.",
+                variable,
+            )
+        da = da.isel({lat_dim: keep_lat, lon_dim: keep_lon})
+    return da.transpose("time", lat_dim, lon_dim), lat, lon
+
+
+def scan_grid(
+    da: xr.DataArray, period: tuple[str, str] | None, *, chunk: int = 365
+) -> tuple[np.ndarray, np.ndarray, int]:
+    """One pass over the reference, a year at a time, to save memory.
+
+    Returns (cells with any data, valid days per cell in the calibration
+    window, number of calendar days in that window). Cells without any
+    data (sea, outside the country) are not corrected at all.
+    """
+    index = da.indexes["time"]
+    days = pd.DatetimeIndex(
+        index if isinstance(index, pd.DatetimeIndex) else index.to_datetimeindex()
+    ).floor("D")
+    start, end = (days[0], days[-1]) if period is None else _span(period, "calibration")
+    window = pd.date_range(start, end, freq="D").floor("D")
+    in_window = days.isin(window)
+    has_data = np.zeros(da.shape[1:], dtype=bool)
+    valid = np.zeros(da.shape[1:], dtype=int)
+    for a in range(0, da.sizes["time"], chunk):
+        finite = np.isfinite(np.asarray(da.isel(time=slice(a, a + chunk)).values))
+        has_data |= finite.any(axis=0)
+        valid += finite[in_window[a : a + chunk]].sum(axis=0)
+    return has_data, valid, len(window)
+
+
+def grid_target(
+    da: xr.DataArray, lat: Hashable, lon: Hashable, has_data: np.ndarray
+) -> TargetGrid:
+    """The cells to correct, row by row."""
+    iy, ix = np.nonzero(has_data)
+    return TargetGrid(
+        np.asarray(da[lat].values, float), np.asarray(da[lon].values, float), iy, ix
+    )
+
+
+def load_grid_points(
+    da: xr.DataArray, target: TargetGrid, variable: str
+) -> xr.DataArray:
+    """(time, station) reference values of the target cells; 'station' holds the cell ids."""
+    lat_dim = da.dims[1]  # rows; opened as (time, lat, lon)
+    top, bottom = int(target.iy.min()), int(target.iy.max())
+    band = np.asarray(da.isel({lat_dim: slice(top, bottom + 1)}).values, dtype=float)
+    return xr.DataArray(
+        band[:, target.iy - top, target.ix],
+        dims=("time", "station"),
+        coords={
+            "time": da["time"].values,
+            "station": target.ids,
+            "lat": ("station", target.point_lat),
+            "lon": ("station", target.point_lon),
+        },
+        attrs={"units": da.attrs.get("units", "")},
+        name=variable,
+    )
+
+
+def _fail(qa: list[QACheck], name: str, message: str, variable: str) -> NoReturn:
+    qa.append(
+        QACheck(
+            name=name, status="fail", message=message, context={"variable": variable}
+        )
+    )
+    raise ValueError(f"{message} -- see QACheck '{name}'.")

@@ -20,7 +20,9 @@ from bcflow.pipeline import run_pipeline
 def test_both_variables_succeed(toy_config):
     out = run_pipeline(toy_config)
 
-    assert all(c.status != "fail" for c in out["qa"]), [c.as_dict() for c in out["qa"] if c.status == "fail"]
+    assert all(c.status != "fail" for c in out["qa"]), [
+        c.as_dict() for c in out["qa"] if c.status == "fail"
+    ]
     assert out["results"]["tmax"] is not None
     assert out["results"]["precip"] is not None
 
@@ -28,6 +30,7 @@ def test_both_variables_succeed(toy_config):
 def test_tmax_adjustment_moves_mean_toward_ref(toy_config):
     """Sanity check: after correction the mean of scen is close to the stations'."""
     cfg = load_config(toy_config)
+    assert cfg.stations is not None
     qa = []
     ref = load_station_variable(cfg.stations, "tmax", "degC", qa)
     scen = run_variable(cfg, "tmax", qa)["scen"]
@@ -39,10 +42,14 @@ def test_tmax_adjustment_moves_mean_toward_ref(toy_config):
 def test_precip_adapt_freq_reduces_dry_day_mismatch(toy_config):
     """adapt_freq must bring the share of dry days of scen closer to the stations'."""
     cfg = load_config(toy_config)
+    assert cfg.stations is not None
     qa = []
     ref = load_station_variable(cfg.stations, "precip", "mm d-1", qa)
     sim = extract_nearest(
-        load_model_variable(cfg.model, "sim", "precip", qa), ref, qa, source_label="precip:sim"
+        load_model_variable(cfg.model, "sim", "precip", qa),
+        ref,
+        qa,
+        source_label="precip:sim",
     )
     scen = run_variable(cfg, "precip", qa)["scen"]
 
@@ -52,12 +59,19 @@ def test_precip_adapt_freq_reduces_dry_day_mismatch(toy_config):
     dry_sim = (sim.sel(time=wet_months) == 0).mean("time")
     dry_scen = (scen.sel(time=wet_months) == 0).mean("time")
 
-    assert float(abs(dry_scen - dry_ref).mean()) <= float(abs(dry_sim - dry_ref).mean()) + 1e-9
+    assert (
+        float(abs(dry_scen - dry_ref).mean())
+        <= float(abs(dry_sim - dry_ref).mean()) + 1e-9
+    )
 
 
 def test_precip_is_never_negative(toy_config):
     out = run_pipeline(
-        {**toy_config, "variables": ["precip"], "correction": {"precip": toy_config["correction"]["precip"]}}
+        {
+            **toy_config,
+            "variables": ["precip"],
+            "correction": {"precip": toy_config["correction"]["precip"]},
+        }
     )
     assert float(out["results"]["precip"]["scen"].min()) >= 0.0
 
@@ -69,9 +83,14 @@ def test_defaults_run_without_any_override(toy_config):
 
     out = run_pipeline(cfg)
 
-    assert out["results"]["precip"] is not None, [c.message for c in out["qa"] if c.status == "fail"]
+    assert out["results"]["precip"] is not None, [
+        c.message for c in out["qa"] if c.status == "fail"
+    ]
     done = next(c for c in out["qa"] if c.name == "train_adjust:precip:done")
-    assert done.context["method"] == "quantile_delta_mapping" and done.context["group"] == "month"
+    assert (
+        done.context["method"] == "quantile_delta_mapping"
+        and done.context["group"] == "month"
+    )
 
 
 def test_default_precip_has_no_nan_or_inf_from_dry_days(toy_config):
@@ -90,7 +109,9 @@ def test_default_precip_has_no_nan_or_inf_from_dry_days(toy_config):
     assert not any(c.name == "adjust:precip:non_finite" for c in out["qa"])
 
 
-@pytest.mark.filterwarnings("ignore:All-[Nn]a[Nn] slice:RuntimeWarning")  # the empty station, on purpose
+@pytest.mark.filterwarnings(
+    "ignore:All-[Nn]a[Nn] slice:RuntimeWarning"
+)  # the empty station, on purpose
 def test_station_without_calibration_data_is_named(toy_config):
     """A station whose observations all fall outside calibration gives an
     all-NaN corrected series; the QA must name it."""
@@ -98,7 +119,11 @@ def test_station_without_calibration_data_is_named(toy_config):
     df = pd.read_csv(path)
     df.loc[pd.to_datetime(df["date"]) < "2013-01-01", "tmax"] = np.nan
     df.to_csv(path, index=False)
-    cfg = {**toy_config, "variables": ["tmax"], "periods": {"calibration": ["2000", "2012"]}}
+    cfg = {
+        **toy_config,
+        "variables": ["tmax"],
+        "periods": {"calibration": ["2000", "2012"]},
+    }
     del cfg["correction"]["precip"]
 
     out = run_pipeline(cfg)
@@ -128,7 +153,9 @@ def test_one_bad_variable_does_not_break_the_others(toy_config):
 
     assert out["results"]["tmax"] is None
     assert out["results"]["precip"] is not None
-    assert any(c.name == "stations:tmax:none_loaded" and c.status == "fail" for c in out["qa"])
+    assert any(
+        c.name == "stations:tmax:none_loaded" and c.status == "fail" for c in out["qa"]
+    )
 
 
 def test_unknown_method_fails_only_that_variable(toy_config):

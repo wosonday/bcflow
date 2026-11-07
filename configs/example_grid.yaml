@@ -1,0 +1,32 @@
+# Example config with GRIDDED observations as the reference -- matches the toy
+# data written by scripts/make_toy_data.py to data/toy/ (obs_grid.nc, 0.5 degree).
+# Run:  uv run python scripts/make_toy_data.py
+#       uv run bcflow run configs/example_grid.yaml
+
+grid:
+  path: ../data/toy/obs_grid.nc
+  var_map: { precip: pr, tmax: tasmax }
+  units: { precip: "mm d-1", tmax: degC }   # the file says "var_unit", as CDO writes
+  # region: { lat: [15, 18], lon: [105, 107] }   # optional: only part of the grid
+  block_size: 500                            # cells corrected together
+
+variables: [precip, tmax]
+
+model:
+  hist: ../data/toy/model_hist_{var}.nc
+  sim: ../data/toy/model_sim_{var}.nc
+  var_map: { precip: pr, tmax: tasmax }
+
+periods:
+  calibration: ["2000", "2012"]
+  validation: ["2013", "2020"]
+
+# Regrid method per variable (defaults: precip conservative, others bilinear):
+# nearest | idw | bilinear | bicubic | conservative | patch
+correction:
+  tmax:
+    regrid: bicubic
+
+output:
+  path: ../outputs
+  formats: [netcdf]          # add csv for long-format tables (large for big grids)

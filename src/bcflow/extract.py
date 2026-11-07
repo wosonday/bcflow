@@ -20,7 +20,7 @@ from collections.abc import Hashable
 
 import numpy as np
 import xarray as xr
-from scipy.spatial import cKDTree
+from scipy.spatial import KDTree
 
 from .grouping import resolve_latlon_dims
 from .qa import QACheck
@@ -39,7 +39,9 @@ def _match_lon(lons: np.ndarray, grid_lon: np.ndarray) -> np.ndarray:
 
 def _unit_sphere(lat_deg: np.ndarray, lon_deg: np.ndarray) -> np.ndarray:
     lat, lon = np.radians(lat_deg), np.radians(lon_deg)
-    return np.column_stack([np.cos(lat) * np.cos(lon), np.cos(lat) * np.sin(lon), np.sin(lat)])
+    return np.column_stack(
+        [np.cos(lat) * np.cos(lon), np.cos(lat) * np.sin(lon), np.sin(lat)]
+    )
 
 
 class _Regular:
@@ -83,12 +85,12 @@ class _Curvilinear:
         self.glat = np.asarray(da[lat].values, float)
         self.glon = np.asarray(da[lon].values, float)
         self.xyz = _unit_sphere(self.glat.ravel(), self.glon.ravel())
-        self.tree = cKDTree(self.xyz)
+        self.tree = KDTree(self.xyz, leafsize=16)
 
     def nearest(self, slat: np.ndarray, slon: np.ndarray):
         _, flat = self.tree.query(_unit_sphere(slat, slon))
         i, j = np.unravel_index(flat, self.glat.shape)
-        return i, j, np.zeros(len(slat), dtype=bool)
+        return np.asarray(i), np.asarray(j), np.zeros(len(slat), dtype=bool)
 
     def candidates(self, slat: float, slon: float, i: int, j: int, radius: int):
         n0, n1 = self.glat.shape
@@ -130,7 +132,9 @@ def extract_nearest(
     would clash with the stations' own lat/lon when xsdba aligns them).
     """
     variable = source_label.split(":")[0]
-    lat, lon = resolve_latlon_dims(da, lat_name, lon_name, qa, source_label=source_label)
+    lat, lon = resolve_latlon_dims(
+        da, lat_name, lon_name, qa, source_label=source_label
+    )
     grid = _Regular(da, lat, lon) if da[lat].ndim == 1 else _Curvilinear(da, lat, lon)
 
     stations = [str(s) for s in ref["station"].values]
@@ -139,10 +143,17 @@ def extract_nearest(
     i, j, outside = grid.nearest(slat, slon)
 
     out = da.isel(
-        {grid.dims[0]: xr.DataArray(i, dims="station"), grid.dims[1]: xr.DataArray(j, dims="station")}
+        {
+            grid.dims[0]: xr.DataArray(i, dims="station"),
+            grid.dims[1]: xr.DataArray(j, dims="station"),
+        }
     )
     out = out.drop_vars([c for c in out.coords if c != "time"], errors="ignore")
-    out = out.assign_coords(station=ref["station"].values).transpose("time", "station").load()
+    out = (
+        out.assign_coords(station=ref["station"].values)
+        .transpose("time", "station")
+        .load()
+    )
 
     empty = out.isnull().all("time").values
     moved: dict[str, dict] = {}
@@ -150,7 +161,9 @@ def extract_nearest(
     for k in np.flatnonzero(empty):
         found = None
         if search_radius > 0:
-            for a, b in grid.candidates(slat[k], slon[k], int(i[k]), int(j[k]), search_radius):
+            for a, b in grid.candidates(
+                slat[k], slon[k], int(i[k]), int(j[k]), search_radius
+            ):
                 series = _cell(da, grid.dims, a, b).load()
                 if bool(series.notnull().any()):
                     found = (a, b, series)
@@ -173,7 +186,11 @@ def extract_nearest(
                 f"{source_label}: {len(stations)} station(s) read from {len(cells)} grid cell(s) "
                 f"({'regular' if isinstance(grid, _Regular) else 'curvilinear'} grid, lat='{lat}', lon='{lon}')."
             ),
-            context={"variable": variable, "n_stations": len(stations), "n_cells": len(cells)},
+            context={
+                "variable": variable,
+                "n_stations": len(stations),
+                "n_cells": len(cells),
+            },
         )
     )
     if outside.any():

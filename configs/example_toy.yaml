@@ -26,6 +26,7 @@ model:
 periods:
   calibration: ["2000", "2012"]   # years used to train the correction
   validation: ["2013", "2020"]    # held-out years for the before/after check
+  min_coverage: 0.8               # stations with fewer valid calibration days are reported
 
 # Optional: override the per-variable defaults (see src/bcflow/variables.py).
 # Defaults: quantile_delta_mapping, group: month; precip also adapt_freq at 1 mm/d.

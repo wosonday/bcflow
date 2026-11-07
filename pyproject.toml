@@ -1,7 +1,7 @@
 [project]
 name = "bcflow"
 version = "0.1.0"
-description = "Pipeline bias-correction dựa trên xsdba, điều khiển qua config.yaml"
+description = "Config-driven bias-correction pipeline built on xsdba"
 readme = "README.md"
 authors = [{ name = "wosonday", email = "thanhsonmttn@gmail.com" }]
 requires-python = ">=3.14"
@@ -22,9 +22,7 @@ dependencies = [
 bcflow = "bcflow.cli:main"
 
 [dependency-groups]
-dev = [
-    "pytest>=9.2.0",
-]
+dev = ["pytest>=9.2.0"]
 
 [build-system]
 requires = ["uv_build>=0.13.5,<0.14.0"]
@@ -33,6 +31,7 @@ build-backend = "uv_build"
 [tool.basedpyright]
 typeCheckingMode = "standard"
 extraPaths = ["scripts"]
+reportReturnType = "none"
 
 [tool.pytest.ini_options]
 filterwarnings = [

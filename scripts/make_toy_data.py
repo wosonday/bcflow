@@ -4,6 +4,9 @@
     <root>/weather/<id>.csv            date,precip,tmax (21 years, daily)
     <root>/model_hist_<var>.nc         model hist, one file per variable (pr, tasmax)
     <root>/model_sim_<var>.nc          model sim, with a deliberate extra bias
+    <root>/obs_grid.nc                 gridded observations (0.5 deg, pr + tasmax,
+                                       some sea cells empty, units "var_unit" as
+                                       CDO writes them) for the gridded reference
 
 The model carries known biases (tasmax +1.8 degC in hist, +2.1 in sim;
 more and lighter rain days than the stations), so the tests can check that
@@ -36,7 +39,9 @@ def _wet_season(doy: np.ndarray) -> np.ndarray:
     return np.clip(np.sin(2 * np.pi * (doy - 150) / 365), 0, None)
 
 
-def generate_toy_dataset(root: Path, seed: int = 42, n_years: int = 21) -> dict[str, Path]:
+def generate_toy_dataset(
+    root: Path, seed: int = 42, n_years: int = 21
+) -> dict[str, Path]:
     """Write every toy file under `root`; return the paths, keyed by role."""
     root = Path(root)
     weather = root / "weather"
@@ -51,11 +56,20 @@ def generate_toy_dataset(root: Path, seed: int = 42, n_years: int = 21) -> dict[
     meta = root / "weather_stations.csv"
     STATIONS.to_csv(meta, index=False)
     for i, sid in enumerate(STATIONS["id"]):
-        tmax = -10 * np.cos(2 * np.pi * doy / 365) + 27 - 2 * i + rng.normal(0, 1.2, size=n)
+        tmax = (
+            -10 * np.cos(2 * np.pi * doy / 365)
+            + 27
+            - 2 * i
+            + rng.normal(0, 1.2, size=n)
+        )
         is_wet = rng.random(n) < 0.15 + 0.5 * _wet_season(doy)
         precip = np.where(is_wet, rng.gamma(shape=1.5, scale=8.0, size=n), 0.0)
         pd.DataFrame(
-            {"date": time.strftime("%Y-%m-%d"), "precip": precip.round(2), "tmax": tmax.round(2)}
+            {
+                "date": time.strftime("%Y-%m-%d"),
+                "precip": precip.round(2),
+                "tmax": tmax.round(2),
+            }
         ).to_csv(weather / f"{sid}.csv", index=False)
 
     # --- model: regular 6 x 6 grid over Vietnam, deliberately biased ---------
@@ -93,7 +107,45 @@ def generate_toy_dataset(root: Path, seed: int = 42, n_years: int = 21) -> dict[
             path = root / f"model_{which}_{var}.nc"
             field(var, add, mult).to_netcdf(path)
             paths[f"{which}_{var}"] = path
+
+    paths["obs_grid"] = _obs_grid(root / "obs_grid.nc", time, doy, seed + 1)
     return paths
+
+
+def _obs_grid(path: Path, time: pd.DatetimeIndex, doy: np.ndarray, seed: int) -> Path:
+    """0.5-degree observations, stamped at 12:00 like many gridded products.
+
+    Its own random generator, so adding it changed none of the files above.
+    """
+    rng = np.random.default_rng(seed)
+    lats = np.arange(9.25, 22.5, 0.5)
+    lons = np.arange(104.75, 109.5, 0.5)
+    shape = (time.size, lats.size, lons.size)
+    lat_trend = (lats - lats.mean())[None, :, None]
+    tasmax = (
+        (-10 * np.cos(2 * np.pi * doy / 365) + 27)[:, None, None]
+        - 0.4 * lat_trend
+        + rng.normal(0, 1.2, size=shape)
+    )
+    is_wet = rng.random(shape) < (0.15 + 0.5 * _wet_season(doy))[:, None, None]
+    pr = np.where(is_wet, rng.gamma(shape=1.5, scale=8.0, size=shape), 0.0)
+    sea = np.zeros((lats.size, lons.size), dtype=bool)
+    sea[:4, -3:] = True  # a corner of open sea: no data at all
+    tasmax[:, sea], pr[:, sea] = np.nan, np.nan
+    coords = {"time": time + pd.Timedelta(hours=12), "lat": lats, "lon": lons}
+    ds = xr.Dataset(
+        {
+            "pr": (("time", "lat", "lon"), pr.astype("float32"), {"units": "var_unit"}),
+            "tasmax": (
+                ("time", "lat", "lon"),
+                tasmax.astype("float32"),
+                {"units": "var_unit"},
+            ),
+        },
+        coords=coords,
+    )
+    ds.to_netcdf(path)
+    return path
 
 
 if __name__ == "__main__":

@@ -22,10 +22,17 @@ from pydantic import ValidationError
 
 from ._version import bcflow_version
 from .config_loader import load_config_file
-from .config_schema import PipelineConfig, load_config
-from .loaders import load_station_metadata, station_file
+from .config_schema import PipelineConfig, StationsConfig, load_config
+from .coverage import check_coverage
+from .loaders import (
+    load_station_metadata,
+    load_station_variable,
+    open_grid_reference,
+    station_file,
+)
 from .methods import METHOD_REGISTRY
 from .pipeline import EventHandler, run_pipeline
+from .qa import QACheck
 from .variables import VARIABLES
 from .writers import write_run
 
@@ -40,6 +47,7 @@ __all__ = [
 
 
 # --- methods / schema -------------------------------------------------------
+
 
 def _first_line(text: str | None) -> str:
     return (text or "").strip().splitlines()[0] if (text or "").strip() else ""
@@ -60,6 +68,7 @@ def config_json_schema() -> dict:
 
 # --- validate ---------------------------------------------------------------
 
+
 def _variable_of(loc: list) -> str | None:
     """The variable an error belongs to, when its location names one."""
     return next((str(x) for x in loc if x in VARIABLES), None)
@@ -73,34 +82,90 @@ def _pydantic_errors(exc: ValidationError) -> list[dict]:
     return out
 
 
+def _station_errors(st: StationsConfig) -> list[dict]:
+    errors: list[dict] = []
+    missing = [
+        key for key in ("metadata", "data_dir") if not Path(getattr(st, key)).exists()
+    ]
+    for key in missing:
+        errors.append(
+            {
+                "variable": None,
+                "loc": ["stations", key],
+                "message": f"Path not found: {getattr(st, key)}",
+            }
+        )
+    if not missing:
+        try:
+            meta = load_station_metadata(st)
+        except (OSError, ValueError) as exc:
+            errors.append(
+                {"variable": None, "loc": ["stations", "metadata"], "message": str(exc)}
+            )
+        else:
+            if not any(
+                station_file(st, str(sid), str(row["name"])).is_file()
+                for sid, row in meta.iterrows()
+            ):
+                errors.append(
+                    {
+                        "variable": None,
+                        "loc": ["stations", "file_pattern"],
+                        "message": f"No station file matches '{st.file_pattern}' in {st.data_dir}.",
+                    }
+                )
+
+    return errors
+
+
+def _grid_errors(cfg: PipelineConfig) -> list[dict]:
+    """The reference grid exists, holds every mapped variable, and has usable units."""
+    grid = cfg.grid
+    assert grid is not None
+    if not Path(grid.path).exists():
+        return [
+            {
+                "variable": None,
+                "loc": ["grid", "path"],
+                "message": f"Path not found: {grid.path}",
+            }
+        ]
+    errors: list[dict] = []
+    for v in cfg.variables:
+        try:
+            open_grid_reference(grid, v, [])
+        except (OSError, ValueError) as exc:
+            loc = (
+                ["grid", "units", v] if "units" in str(exc) else ["grid", "var_map", v]
+            )
+            errors.append(
+                {
+                    "variable": v,
+                    "loc": loc,
+                    "message": str(exc).split(" -- see QACheck")[0],
+                }
+            )
+    return errors
+
+
 def _semantic_errors(cfg: PipelineConfig) -> list[dict]:
     """Checks the schema alone cannot do: registered methods, existing inputs."""
     errors: list[dict] = []
     for v in cfg.variables:
         method = cfg.spec(v).method
         if method not in METHOD_REGISTRY:
-            errors.append({
-                "variable": v,
-                "loc": ["correction", v, "method"],
-                "message": f"Method '{method}' is not registered. Valid methods: {sorted(METHOD_REGISTRY)}.",
-            })
+            errors.append(
+                {
+                    "variable": v,
+                    "loc": ["correction", v, "method"],
+                    "message": f"Method '{method}' is not registered. Valid methods: {sorted(METHOD_REGISTRY)}.",
+                }
+            )
 
-    st = cfg.stations
-    missing = [key for key in ("metadata", "data_dir") if not Path(getattr(st, key)).exists()]
-    for key in missing:
-        errors.append({"variable": None, "loc": ["stations", key], "message": f"Path not found: {getattr(st, key)}"})
-    if not missing:
-        try:
-            meta = load_station_metadata(st)
-        except (OSError, ValueError) as exc:
-            errors.append({"variable": None, "loc": ["stations", "metadata"], "message": str(exc)})
-        else:
-            if not any(station_file(st, str(sid), str(row["name"])).is_file() for sid, row in meta.iterrows()):
-                errors.append({
-                    "variable": None,
-                    "loc": ["stations", "file_pattern"],
-                    "message": f"No station file matches '{st.file_pattern}' in {st.data_dir}.",
-                })
+    if cfg.stations is not None:
+        errors += _station_errors(cfg.stations)
+    if cfg.grid is not None:
+        errors += _grid_errors(cfg)
 
     seen: set[str] = set()
     for v in cfg.variables:
@@ -110,33 +175,105 @@ def _semantic_errors(cfg: PipelineConfig) -> list[dict]:
                 continue
             seen.add(path)
             if not Path(path).exists():
-                errors.append({"variable": v, "loc": ["model", which], "message": f"Path not found: {path}"})
+                errors.append(
+                    {
+                        "variable": v,
+                        "loc": ["model", which],
+                        "message": f"Path not found: {path}",
+                    }
+                )
     return errors
 
 
+_WARNING_LOC = {"low": ["stations"], "short_period": ["periods", "calibration"]}
+
+
+def _data_checks(cfg: PipelineConfig) -> tuple[list[dict], list[dict]]:
+    """Read the station data of each variable and run the coverage checks.
+
+    Only the station files are read (seconds), never the model files, so a
+    form can show which stations are too sparse before a long run starts.
+    Returns (errors, warnings).
+    """
+    errors: list[dict] = []
+    warnings: list[dict] = []
+    if cfg.stations is None:  # a gridded reference is checked when it runs
+        return errors, warnings
+    for v in cfg.variables:
+        qa: list[QACheck] = []
+        try:
+            ref = load_station_variable(cfg.stations, v, cfg.spec(v).units, qa)
+        except (OSError, ValueError) as exc:
+            errors.append({"variable": v, "loc": ["variables"], "message": str(exc)})
+            continue
+        check_coverage(
+            ref,
+            cfg.periods.calibration,
+            qa,
+            name=v,
+            min_coverage=cfg.periods.min_coverage,
+        )
+        for check in qa:
+            if check.status == "warn":
+                kind = check.name.rsplit(":", 1)[-1]
+                warnings.append(
+                    {
+                        "variable": v,
+                        "loc": _WARNING_LOC.get(kind, ["stations"]),
+                        "name": check.name,
+                        "message": check.message,
+                        "context": check.context,
+                    }
+                )
+    return errors, warnings
+
+
 def validate_config_file(path: str | Path) -> dict:
-    """Check a config without running it: schema, method names, input paths.
+    """Check a config without running it: schema, method names, input paths,
+    then -- if those are fine -- the station data of every variable.
 
     Every problem is reported, not just the first, so a form can highlight
     all of them at once. Returns
         {"valid": bool, "variables": [name, ...],
-         "errors": [{"variable": name | None, "loc": [...], "message": str}]}
+         "errors":   [{"variable": name | None, "loc": [...], "message": str}],
+         "warnings": [{"variable": name, "loc": [...], "name": str,
+                       "message": str, "context": {...}}]}
     where `loc` is the path to the offending field, e.g. ["model", "hist"].
+    Warnings (e.g. stations with too few calibration days) do not make the
+    config invalid.
     """
     try:
         raw = load_config_file(path)
     except ValueError as exc:
-        return {"valid": False, "variables": [], "errors": [{"variable": None, "loc": [], "message": str(exc)}]}
+        return {
+            "valid": False,
+            "variables": [],
+            "errors": [{"variable": None, "loc": [], "message": str(exc)}],
+            "warnings": [],
+        }
 
     listed = raw.get("variables")
     names = [str(v) for v in listed] if isinstance(listed, list) else []
     try:
         cfg = load_config(raw)
     except ValidationError as exc:
-        return {"valid": False, "variables": names, "errors": _pydantic_errors(exc)}
+        return {
+            "valid": False,
+            "variables": names,
+            "errors": _pydantic_errors(exc),
+            "warnings": [],
+        }
 
     errors = _semantic_errors(cfg)
-    return {"valid": not errors, "variables": [str(v) for v in cfg.variables], "errors": errors}
+    warnings: list[dict] = []
+    if not errors:
+        errors, warnings = _data_checks(cfg)
+    return {
+        "valid": not errors,
+        "variables": [str(v) for v in cfg.variables],
+        "errors": errors,
+        "warnings": warnings,
+    }
 
 
 # --- inspect ----------------------------------------------------------------
@@ -147,7 +284,9 @@ _RASTER_SUFFIXES = {".nc", ".nc4", ".netcdf", ".zarr"}
 def _is_raster(p: Path) -> bool:
     if p.suffix.lower() in _RASTER_SUFFIXES:
         return True
-    return p.is_dir() and any((p / marker).exists() for marker in (".zgroup", "zarr.json"))
+    return p.is_dir() and any(
+        (p / marker).exists() for marker in (".zgroup", "zarr.json")
+    )
 
 
 def _time_info(t: xr.DataArray) -> dict | None:
@@ -164,7 +303,7 @@ def _time_info(t: xr.DataArray) -> dict | None:
 
 def _inspect_raster(p: Path) -> dict:
     is_zarr = p.is_dir()
-    with (xr.open_zarr(p) if is_zarr else xr.open_dataset(p)) as ds:
+    with xr.open_zarr(p) if is_zarr else xr.open_dataset(p) as ds:
         return {
             "kind": "raster",
             "path": str(p),
@@ -179,19 +318,35 @@ def _inspect_raster(p: Path) -> dict:
                 }
                 for name, var in ds.data_vars.items()
             ],
-            "coords": {str(n): {"dims": [str(d) for d in c.dims], "size": int(c.size)} for n, c in ds.coords.items()},
+            "coords": {
+                str(n): {"dims": [str(d) for d in c.dims], "size": int(c.size)}
+                for n, c in ds.coords.items()
+            },
             "time": _time_info(ds["time"]) if "time" in ds.coords else None,
         }
 
 
 def _inspect_table(p: Path) -> dict:
     df = pd.read_csv(p)
-    info: dict[str, Any] = {"kind": "table", "path": str(p), "columns": [str(c) for c in df.columns], "n_rows": int(len(df)), "time": None}
-    date_col = next((c for c in df.columns if str(c).strip().lower() in ("date", "time")), None)
+    info: dict[str, Any] = {
+        "kind": "table",
+        "path": str(p),
+        "columns": [str(c) for c in df.columns],
+        "n_rows": len(df),
+        "time": None,
+    }
+    date_col = next(
+        (c for c in df.columns if str(c).strip().lower() in ("date", "time")), None
+    )
     if date_col is not None:
         t = pd.to_datetime(df[date_col], errors="coerce").dropna()
         if len(t):
-            info["time"] = {"start": t.min().strftime("%Y-%m-%d"), "end": t.max().strftime("%Y-%m-%d"), "n": int(len(t)), "calendar": "standard"}
+            info["time"] = {
+                "start": t.min().strftime("%Y-%m-%d"),
+                "end": t.max().strftime("%Y-%m-%d"),
+                "n": len(t),
+                "calendar": "standard",
+            }
     return info
 
 
@@ -223,7 +378,9 @@ def inspect_path(path: str | Path) -> dict:
         return _inspect_station_folder(p)
     if p.suffix.lower() == ".csv":
         return _inspect_table(p)
-    raise ValueError(f"Unsupported file type: {p.name!r}. Expected .nc, .zarr, .csv or a folder of .csv files.")
+    raise ValueError(
+        f"Unsupported file type: {p.name!r}. Expected .nc, .zarr, .csv or a folder of .csv files."
+    )
 
 
 # --- run --------------------------------------------------------------------
@@ -231,13 +388,24 @@ def inspect_path(path: str | Path) -> dict:
 _STATUSES = ("pass", "warn", "fail")
 
 
-def _summary(out: dict | None, manifest: Path | None, *, error: str | None = None) -> dict:
+def _summary(
+    out: dict | None, manifest: Path | None, *, error: str | None = None
+) -> dict:
     qa = out["qa"] if out else []
     counts = {s: sum(1 for c in qa if c.status == s) for s in _STATUSES}
-    if manifest is not None:  # the manifest is authoritative: it includes write failures
-        variables = {n: v["status"] for n, v in json.loads(manifest.read_text(encoding="utf-8"))["variables"].items()}
+    if (
+        manifest is not None
+    ):  # the manifest is authoritative: it includes write failures
+        variables = {
+            n: v["status"]
+            for n, v in json.loads(manifest.read_text(encoding="utf-8"))[
+                "variables"
+            ].items()
+        }
     elif out:
-        variables = {n: ("ok" if r is not None else "failed") for n, r in out["results"].items()}
+        variables = {
+            n: ("ok" if r is not None else "failed") for n, r in out["results"].items()
+        }
     else:
         variables = {}
 
@@ -285,5 +453,11 @@ def run_config_file(path: str | Path, on_event: EventHandler | None = None) -> d
         return _summary(out, None, error=f"Cannot create the output folder: {exc}")
 
     for check in out["qa"][n_before:]:  # failures raised while writing
-        emit({"event": "qa", "variable": check.context.get("variable"), "check": check.as_dict()})
+        emit(
+            {
+                "event": "qa",
+                "variable": check.context.get("variable"),
+                "check": check.as_dict(),
+            }
+        )
     return _summary(out, manifest)

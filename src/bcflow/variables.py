@@ -16,6 +16,10 @@ factor ref/hist of a quantile where hist is 0 is inf or NaN. As in Cannon
 et al. (2015, section 3), values below a small trace threshold are replaced
 by uniform random values below it before training and adjusting, and set
 back to 0 afterwards (`jitter_under_thresh`).
+
+With a gridded reference the model is regridded onto it first (regrid.py):
+precipitation conservatively, so area totals of rain are kept (Jones, 1999,
+Mon. Wea. Rev. 127(9), 2204-2210), the other variables bilinearly.
 """
 
 from __future__ import annotations
@@ -45,7 +49,12 @@ class VariableSpec:
         default_factory=lambda: {"interp": "linear", "extrapolation": "constant"}
     )
     bounds: tuple[float | None, float | None] = (None, None)  # physical limits
-    jitter_under_thresh: str | None = None  # trace threshold for exact zeros, e.g. "0.01 mm d-1"
+    jitter_under_thresh: str | None = (
+        None  # trace threshold for exact zeros, e.g. "0.01 mm d-1"
+    )
+    # How the model is put on a gridded reference (regrid.py); unused with stations.
+    regrid: str = "bilinear"
+    regrid_params: dict[str, Any] = field(default_factory=dict)
 
 
 DEFAULTS: dict[str, VariableSpec] = {
@@ -58,11 +67,14 @@ DEFAULTS: dict[str, VariableSpec] = {
         adjust_params={"interp": "nearest", "extrapolation": "constant"},
         bounds=(0.0, None),
         jitter_under_thresh="0.01 mm d-1",
+        regrid="conservative",  # keeps area totals of rain (Jones, 1999)
     ),
     "tmax": VariableSpec(name="tmax", units="degC", kind="+"),
     "tmin": VariableSpec(name="tmin", units="degC", kind="+"),
     "wind": VariableSpec(name="wind", units="m s-1", kind="*", bounds=(0.0, None)),
-    "solar": VariableSpec(name="solar", units="MJ m-2 d-1", kind="*", bounds=(0.0, None)),
+    "solar": VariableSpec(
+        name="solar", units="MJ m-2 d-1", kind="*", bounds=(0.0, None)
+    ),
     "humidity": VariableSpec(name="humidity", units="1", kind="+", bounds=(0.0, 1.0)),
 }
 

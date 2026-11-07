@@ -3,8 +3,12 @@
 Steps, in order:
     1. resolve the variable's settings: defaults + `correction:` overrides
        (variables.py), and check the method name    (methods.py)
-    2. load the stations and the model hist/sim     (loaders.py)
-    3. take the grid cell nearest to each station   (extract.py)
+    2. load the reference, report the stations / cells with too few
+       calibration days                             (loaders.py, coverage.py)
+       and load the model hist/sim
+    3. put the model on the reference: the grid cell nearest to each
+       station (extract.py), or regridded onto the reference grid
+       (regrid.py), one block of cells at a time to save memory
     4. bring all three to one unit                  (units.py)
        and onto one daily time axis                 (timeaxis.py)
     5. keep the calibration period for training     (config: periods)
@@ -20,6 +24,8 @@ variable's failure from another's -- that is pipeline.py's job.
 
 from __future__ import annotations
 
+from typing import cast
+
 import numpy as np
 import pandas as pd
 import pint
@@ -28,12 +34,21 @@ import xsdba
 from xsdba.units import convert_units_to
 
 from .config_schema import PeriodsConfig, PipelineConfig
+from .coverage import check_coverage, coverage_table_from_counts, report_coverage
 from .evaluate import evaluate, paired_series, summarize
 from .extract import extract_nearest
 from .grouping import build_grouper
-from .loaders import load_model_variable, load_station_variable
+from .loaders import (
+    grid_target,
+    load_grid_points,
+    load_model_variable,
+    load_station_variable,
+    open_grid_reference,
+    scan_grid,
+)
 from .methods import METHOD_REGISTRY
 from .qa import QACheck
+from .regrid import TargetGrid, regrid_to_points
 from .timeaxis import align_daily
 from .units import harmonize
 from .variables import VariableSpec
@@ -52,24 +67,143 @@ def run_variable(cfg: PipelineConfig, variable: str, qa: list[QACheck]) -> dict:
     """Bias-correct one variable of a validated config.
 
     Returns {"scen": corrected sim (time, station),
-             "adj": the trained xsdba object,
+             "adj": the trained xsdba object (its .ds is written to adj.nc),
              "evaluation": before/after table with a 'period' column, or None,
              "hist_eval": obs / raw hist / corrected hist (xr.Dataset) over the
-                          calibration and validation periods, or None}.
+                          calibration and validation periods, or None,
+             "grid": the TargetGrid of a gridded reference, else None}.
+    With a gridded reference, 'station' holds one id per grid cell.
     """
     spec = cfg.spec(variable)
     # Before loading: a typo in the method name should not cost a full data load.
     _check_method(spec, qa)
+    if cfg.grid is not None:
+        return _run_grid(cfg, spec, qa)
 
     model = cfg.model
-    ref = load_station_variable(cfg.stations, variable, spec.units, qa)
-    grid = {"lat_name": model.lat_name, "lon_name": model.lon_name, "search_radius": model.search_radius}
+    ref = load_station_variable(cfg.stations, variable, spec.units, qa)  # type: ignore[arg-type]
+    # Early warning, before the (slow) model files are opened.
+    check_coverage(
+        ref,
+        cfg.periods.calibration,
+        qa,
+        name=variable,
+        min_coverage=cfg.periods.min_coverage,
+    )
+    grid = {
+        "lat_name": model.lat_name,
+        "lon_name": model.lon_name,
+        "search_radius": model.search_radius,
+    }
     hist = extract_nearest(
-        load_model_variable(model, "hist", variable, qa), ref, qa, source_label=f"{variable}:hist", **grid
+        load_model_variable(model, "hist", variable, qa),
+        ref,
+        qa,
+        source_label=f"{variable}:hist",
+        **grid,
     )
     sim = extract_nearest(
-        load_model_variable(model, "sim", variable, qa), ref, qa, source_label=f"{variable}:sim", **grid
+        load_model_variable(model, "sim", variable, qa),
+        ref,
+        qa,
+        source_label=f"{variable}:sim",
+        **grid,
     )
+    part = _correct(cfg, spec, ref, hist, sim, qa)
+    return _finish(cfg, spec, [part], qa, grid=None)
+
+
+def _run_grid(cfg: PipelineConfig, spec: VariableSpec, qa: list[QACheck]) -> dict:
+    """Gridded reference: regrid the model onto the reference cells and correct
+    them block by block (grid.block_size cells), so memory stays bounded."""
+    variable, grid_cfg, model = spec.name, cfg.grid, cfg.model
+    assert grid_cfg is not None  # narrowed for the type checker; checked by the caller
+    reference, lat, lon = open_grid_reference(grid_cfg, variable, qa)
+    has_data, valid, window_days = scan_grid(reference, cfg.periods.calibration)
+    target = grid_target(reference, lat, lon, has_data)
+    if target.size == 0:
+        qa.append(
+            QACheck(
+                name=f"grid:{variable}:ref:empty",
+                status="fail",
+                message=f"The reference grid has no data for '{variable}' (in the selected region).",
+                context={"variable": variable},
+            )
+        )
+        raise ValueError(
+            f"No reference data for '{variable}' -- see QACheck 'grid:{variable}:ref:empty'."
+        )
+    # Early warning, before the (slow) model files are opened.
+    report_coverage(
+        coverage_table_from_counts(
+            target.ids, valid[target.iy, target.ix], window_days
+        ),
+        window_days / 365.25,
+        qa,
+        name=variable,
+        min_coverage=cfg.periods.min_coverage,
+        unit="cell",
+    )
+
+    hist_all = load_model_variable(model, "hist", variable, qa)
+    sim_all = load_model_variable(model, "sim", variable, qa)
+    options = {
+        "method": spec.regrid,
+        "params": spec.regrid_params,
+        "lat_name": model.lat_name,
+        "lon_name": model.lon_name,
+    }
+    parts = []
+    for start in range(0, target.size, grid_cfg.block_size):
+        block = target.block(start, start + grid_cfg.block_size)
+        block_qa: list[QACheck] = []
+        ref = load_grid_points(reference, block, variable)
+        hist = _clip(
+            regrid_to_points(
+                hist_all, block, block_qa, source_label=f"{variable}:hist", **options
+            ),
+            spec,
+        )
+        sim = _clip(
+            regrid_to_points(
+                sim_all, block, block_qa, source_label=f"{variable}:sim", **options
+            ),
+            spec,
+        )
+        parts.append(_correct(cfg, spec, ref, hist, sim, block_qa, compact=True))
+        # The first block reports every step; later ones only what went wrong.
+        qa.extend(
+            block_qa if start == 0 else [c for c in block_qa if c.status != "pass"]
+        )
+    return _finish(cfg, spec, parts, qa, grid=target)
+
+
+def _clip(da: xr.DataArray, spec: VariableSpec) -> xr.DataArray:
+    """Keep regridded values within physical limits: bicubic and patch can
+    overshoot, e.g. slightly negative rain next to a dry cell."""
+    low, high = spec.bounds
+    if low is None and high is None:
+        return da
+    return da.clip(min=low, max=high, keep_attrs=True)
+
+
+def _correct(
+    cfg: PipelineConfig,
+    spec: VariableSpec,
+    ref: xr.DataArray,
+    hist: xr.DataArray,
+    sim: xr.DataArray,
+    qa: list[QACheck],
+    *,
+    compact: bool = False,
+) -> dict:
+    """Units, time axis, training, adjustment and evaluation of one set of
+    points (all stations, or one block of grid cells).
+
+    With compact=True the results are kept as float32, halving memory for
+    large grids.
+    """
+    variable = spec.name
     ref, hist, sim, units = harmonize(ref, hist, sim, spec.units, qa, name=variable)
     ref, hist, sim = align_daily(ref, hist, sim, qa, name=variable)
 
@@ -88,10 +222,14 @@ def run_variable(cfg: PipelineConfig, variable: str, qa: list[QACheck]) -> dict:
         # threshold when adapt_freq is true); the check narrows `str | None`
         # to `str` for the type checker and guards direct, unvalidated calls.
         if thresh is None:
-            raise ValueError(f"correction.{variable}: adapt_freq=true requires 'adapt_freq_thresh'.")
+            raise ValueError(
+                f"correction.{variable}: adapt_freq=true requires 'adapt_freq_thresh'."
+            )
         # adapt_freq draws from NumPy's global generator; seed it for reproducibility.
         np.random.seed(_SEED)
-        hist_train, _pth, _dP0 = xsdba.processing.adapt_freq(ref_cal, hist_cal, thresh=thresh, group=group)
+        hist_train, _pth, _dP0 = xsdba.processing.adapt_freq(
+            ref_cal, hist_cal, thresh=thresh, group=group
+        )
         qa.append(
             QACheck(
                 name=f"adapt_freq:{variable}:applied",
@@ -104,7 +242,68 @@ def run_variable(cfg: PipelineConfig, variable: str, qa: list[QACheck]) -> dict:
     train_kwargs = {**spec.train_params, "group": group, "kind": spec.kind}
     adj = METHOD_REGISTRY[spec.method].train(ref_cal, hist_train, **train_kwargs)
     scen = _adjust(adj, sim, spec, zeros)
-    _check_finite(scen, sim, qa, name=variable)
+    tables, series = _evaluate_block(
+        spec, cfg.periods, adj, ref, hist, units, zeros, qa
+    )
+    if compact:
+        scen = scen.astype("float32")
+        series = [s.astype("float32") for s in series]
+    return {
+        "scen": scen,
+        "adj": adj,
+        "tables": tables,
+        "series": series,
+        "non_finite": _non_finite(scen, sim),
+        "units": units,
+        "calibration": _span(ref_cal),
+    }
+
+
+class _CombinedAdjustment:
+    """The trained factors of several blocks of cells, for writing adj.nc."""
+
+    def __init__(self, ds: xr.Dataset):
+        self.ds = ds
+
+
+def _finish(
+    cfg: PipelineConfig,
+    spec: VariableSpec,
+    parts: list[dict],
+    qa: list[QACheck],
+    *,
+    grid: TargetGrid | None,
+) -> dict:
+    """Put the blocks back together and write the summary checks once."""
+    variable = spec.name
+    unit = "cell" if grid is not None else "station"
+    scen = (
+        parts[0]["scen"]
+        if len(parts) == 1
+        else cast(xr.DataArray, xr.concat([p["scen"] for p in parts], dim="station"))
+    )
+    adj = (
+        parts[0]["adj"]
+        if len(parts) == 1
+        else _CombinedAdjustment(
+            cast(xr.Dataset, xr.concat([p["adj"].ds for p in parts], dim="station"))
+        )
+    )
+
+    non_finite = [s for p in parts for s in p["non_finite"]]
+    if non_finite:
+        qa.append(
+            QACheck(
+                name=f"adjust:{variable}:non_finite",
+                status="warn",
+                message=(
+                    f"The correction of '{variable}' produced NaN/inf where the model had valid values at "
+                    f"{len(non_finite)} {unit}(s), e.g. no observation in the calibration period: "
+                    f"{non_finite[:10]}"
+                ),
+                context={"variable": variable, "stations": non_finite},
+            )
+        )
 
     qa.append(
         QACheck(
@@ -112,21 +311,36 @@ def run_variable(cfg: PipelineConfig, variable: str, qa: list[QACheck]) -> dict:
             status="pass",
             message=(
                 f"Completed train+adjust for '{variable}' using '{spec.method}' "
-                f"(group={spec.group}{f', window={spec.window}' if spec.group == 'dayofyear' else ''})."
+                f"(group={spec.group}{f', window={spec.window}' if spec.group == 'dayofyear' else ''}"
+                + (
+                    f", regrid={spec.regrid}, {len(parts)} block(s)"
+                    if grid is not None
+                    else ""
+                )
+                + ")."
             ),
             context={
                 "variable": variable,
                 "method": spec.method,
                 "group": spec.group,
-                "n_stations": int(ref.sizes.get("station", 0)),
-                "calibration": _span(ref_cal),
+                "regrid": spec.regrid if grid is not None else None,
+                "n_stations": int(scen.sizes.get("station", 0)),
+                "calibration": parts[0]["calibration"],
                 "sim": _span(scen),
             },
         )
     )
 
-    evaluation, hist_eval = _evaluate_periods(spec, cfg.periods, adj, ref, hist, units, zeros, qa)
-    return {"scen": scen, "adj": adj, "evaluation": evaluation, "hist_eval": hist_eval}
+    evaluation, hist_eval = _summarize_evaluation(
+        spec, cfg.periods, parts, qa, unit=unit
+    )
+    return {
+        "scen": scen,
+        "adj": adj,
+        "evaluation": evaluation,
+        "hist_eval": hist_eval,
+        "grid": grid,
+    }
 
 
 def _check_method(spec: VariableSpec, qa: list[QACheck]) -> None:
@@ -152,7 +366,9 @@ class _ZeroHandling:
 
     def __init__(self, spec: VariableSpec, units: str):
         self.thresh = (
-            float(convert_units_to(spec.jitter_under_thresh, units)) if spec.jitter_under_thresh else None
+            float(convert_units_to(spec.jitter_under_thresh, units))
+            if spec.jitter_under_thresh
+            else None
         )
         self.rng = np.random.default_rng(_SEED)
 
@@ -168,30 +384,18 @@ class _ZeroHandling:
         return da.where(~(da < self.thresh), 0.0)
 
 
-def _check_finite(scen: xr.DataArray, sim: xr.DataArray, qa: list[QACheck], *, name: str) -> None:
-    """Warn when the correction turned valid model values into NaN or inf.
-
-    Typical cause: a station with no observation in the calibration period,
-    so nothing could be trained for it and its whole series is NaN.
-    """
+def _non_finite(scen: xr.DataArray, sim: xr.DataArray) -> list[str]:
+    """Stations (or cells) where the correction turned valid model values
+    into NaN or inf -- typically no observation in the calibration period,
+    so nothing could be trained for them."""
     bad = ~np.isfinite(scen.values) & np.isfinite(sim.transpose(*scen.dims).values)
     lost = bad.sum(axis=scen.get_axis_num("time"))
-    stations = [str(s) for s, n in zip(scen["station"].values, lost) if n]
-    if stations:
-        qa.append(
-            QACheck(
-                name=f"adjust:{name}:non_finite",
-                status="warn",
-                message=(
-                    f"The correction of '{name}' produced NaN/inf where the model had valid values at "
-                    f"{len(stations)} station(s), e.g. no observation in the calibration period: {stations[:10]}"
-                ),
-                context={"variable": name, "stations": stations, "n_values": int(bad.sum())},
-            )
-        )
+    return [str(s) for s, n in zip(scen["station"].values, lost) if n]
 
 
-def _adjust(adj, da: xr.DataArray, spec: VariableSpec, zeros: _ZeroHandling) -> xr.DataArray:
+def _adjust(
+    adj, da: xr.DataArray, spec: VariableSpec, zeros: _ZeroHandling
+) -> xr.DataArray:
     out = zeros.restore(adj.adjust(zeros.jitter(da), **spec.adjust_params))
     low, high = spec.bounds
     if low is not None or high is not None:
@@ -218,7 +422,9 @@ def _span(da: xr.DataArray) -> dict:
     }
 
 
-def _calibration_slice(da: xr.DataArray, period, qa: list[QACheck], *, label: str) -> xr.DataArray:
+def _calibration_slice(
+    da: xr.DataArray, period, qa: list[QACheck], *, label: str
+) -> xr.DataArray:
     out = _slice(da, period)
     if out.sizes["time"] == 0:
         available = _span(da)
@@ -230,7 +436,11 @@ def _calibration_slice(da: xr.DataArray, period, qa: list[QACheck], *, label: st
                     f"No {label} data in the calibration period {period[0]}..{period[1]} "
                     f"(data covers {available['start']}..{available['end']})."
                 ),
-                context={"variable": label.split(":")[0], "period": list(period), "available": available},
+                context={
+                    "variable": label.split(":")[0],
+                    "period": list(period),
+                    "available": available,
+                },
             )
         )
         raise ValueError(
@@ -244,20 +454,26 @@ def _wet_threshold(spec: VariableSpec, units: str) -> float | None:
     if spec.name != "precip" or not units:
         return None
     try:
-        return float(convert_units_to(spec.adapt_freq_thresh or _DEFAULT_WET_DAY, units))
+        return float(
+            convert_units_to(spec.adapt_freq_thresh or _DEFAULT_WET_DAY, units)
+        )
     except pint.PintError:
         return None
 
 
-def _evaluation_periods(periods: PeriodsConfig) -> list[tuple[str, tuple[str, str] | None]]:
+def _evaluation_periods(
+    periods: PeriodsConfig,
+) -> list[tuple[str, tuple[str, str] | None]]:
     """Calibration always (None = all common data), validation when set."""
-    out: list[tuple[str, tuple[str, str] | None]] = [("calibration", periods.calibration)]
+    out: list[tuple[str, tuple[str, str] | None]] = [
+        ("calibration", periods.calibration)
+    ]
     if periods.validation is not None:
         out.append(("validation", periods.validation))
     return out
 
 
-def _evaluate_periods(
+def _evaluate_block(
     spec: VariableSpec,
     periods: PeriodsConfig,
     adj,
@@ -266,7 +482,7 @@ def _evaluate_periods(
     units: str,
     zeros: _ZeroHandling,
     qa: list[QACheck],
-):
+) -> tuple[dict[str, pd.DataFrame], list[xr.Dataset]]:
     """Apply the trained correction to hist over the calibration AND the
     validation period, and score each period separately.
 
@@ -276,22 +492,23 @@ def _evaluate_periods(
     a failure becomes a 'warn' check, and the other period -- and the
     correction itself -- are kept.
 
-    Returns (table with a 'period' column | None, obs/raw/corrected Dataset | None).
+    Returns ({period label: table}, [obs/raw/corrected Dataset per period]).
     """
     name = spec.name
     wet_thresh = _wet_threshold(spec, units)
-    tables, series = [], []
+    tables: dict[str, pd.DataFrame] = {}
+    series: list[xr.Dataset] = []
 
     for label, period in _evaluation_periods(periods):
         try:
             obs, raw = _slice(ref, period), _slice(hist, period)
             if obs.sizes["time"] == 0 or raw.sizes["time"] == 0:
                 where = f"{period[0]}..{period[1]}" if period else "the common period"
-                raise ValueError(f"no station or model data in {where}")
+                raise ValueError(f"no reference or model data in {where}")
             corrected = _adjust(adj, raw, spec, zeros)
-            table = evaluate(obs, raw, corrected, wet_thresh=wet_thresh, period=label)
-            summarize(table, qa, name=name, label=label, period=period)
-            tables.append(table)
+            tables[label] = evaluate(
+                obs, raw, corrected, wet_thresh=wet_thresh, period=label
+            )
             series.append(paired_series(obs, raw, corrected, period=label))
         except Exception as exc:  # noqa: BLE001 -- isolate evaluation from the correction itself
             qa.append(
@@ -302,6 +519,27 @@ def _evaluate_periods(
                     context={"variable": name, "period_label": label},
                 )
             )
+    return tables, series
+
+
+def _summarize_evaluation(
+    spec: VariableSpec,
+    periods: PeriodsConfig,
+    parts: list[dict],
+    qa: list[QACheck],
+    *,
+    unit: str,
+) -> tuple[pd.DataFrame | None, xr.Dataset | None]:
+    """One summary check per period over every block, the joined table and
+    the obs/raw/corrected series."""
+    name = spec.name
+    all_tables = []
+    for label, period in _evaluation_periods(periods):
+        pieces = [p["tables"][label] for p in parts if label in p["tables"]]
+        if pieces:
+            table = pd.concat(pieces, ignore_index=True)
+            summarize(table, qa, name=name, label=label, period=period, unit=unit)
+            all_tables.append(table)
 
     if periods.validation is None:
         qa.append(
@@ -317,7 +555,16 @@ def _evaluate_periods(
             )
         )
 
-    if not tables:
+    if not all_tables:
         return None, None
-    hist_eval = xr.concat(series, dim="time").sortby("time")
-    return pd.concat(tables, ignore_index=True), hist_eval
+    per_block = [
+        cast(xr.Dataset, xr.concat(p["series"], dim="time")).sortby("time")
+        for p in parts
+        if p["series"]
+    ]
+    hist_eval = (
+        per_block[0]
+        if len(per_block) == 1
+        else cast(xr.Dataset, xr.concat(per_block, dim="station"))
+    )
+    return pd.concat(all_tables, ignore_index=True), hist_eval

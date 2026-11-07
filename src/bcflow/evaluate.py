@@ -179,8 +179,12 @@ def summarize(
     name: str,
     label: str,
     period: tuple[str, str] | None,
+    unit: str = "station",
 ) -> None:
-    """One QA check for one evaluation period (label: 'calibration' | 'validation')."""
+    """One QA check for one evaluation period (label: 'calibration' | 'validation').
+
+    `unit` names the rows: "station", or "cell" for a gridded reference.
+    """
     period_txt = f"{period[0]}..{period[1]}" if period else "the full common period"
     deviation = {
         metric: {
@@ -210,7 +214,7 @@ def summarize(
                 status="warn",
                 message=(
                     f"{label.capitalize()} {period_txt} for '{name}': correction did not reduce |mean bias| "
-                    f"at {len(not_improved)}/{len(mean_bias)} station(s) ({', '.join(not_improved)}); {scores}."
+                    f"at {len(not_improved)}/{len(mean_bias)} {unit}(s) ({_first(not_improved)}); {scores}."
                 ),
                 context={**context, "stations": not_improved},
             )
@@ -220,7 +224,14 @@ def summarize(
             QACheck(
                 name=f"evaluation:{name}:{label}",
                 status="pass",
-                message=f"{label.capitalize()} {period_txt} for '{name}', all {len(mean_bias)} station(s): {scores}.",
+                message=f"{label.capitalize()} {period_txt} for '{name}', all {len(mean_bias)} {unit}(s): {scores}.",
                 context=context,
             )
         )
+
+
+def _first(names: list[str], n: int = 20) -> str:
+    """The first n names, so a grid of thousands of cells keeps the message short."""
+    return ", ".join(names[:n]) + (
+        f", ... (+{len(names) - n})" if len(names) > n else ""
+    )

@@ -50,3 +50,30 @@ def toy_config(toy_paths: dict[str, Path]) -> dict:
             },
         },
     }
+
+
+@pytest.fixture
+def grid_config(toy_config: dict, toy_paths: dict[str, Path]) -> dict:
+    """The toy config with the gridded observations as the reference.
+
+    Units are overridden because the file says "var_unit", as CDO writes.
+    """
+    cfg = {k: v for k, v in toy_config.items() if k != "stations"}
+    cfg["grid"] = {
+        "path": str(toy_paths["obs_grid"]),
+        "var_map": {"precip": "pr", "tmax": "tasmax"},
+        "units": {"precip": "mm d-1", "tmax": "degC"},
+        "block_size": 100,
+    }
+    cfg["periods"] = {"calibration": ["2000", "2012"], "validation": ["2013", "2020"]}
+    cfg["correction"] = {
+        "tmax": {
+            "method": "empirical_quantile_mapping",
+            "train_params": {"nquantiles": 15},
+        },
+        "precip": {
+            "method": "empirical_quantile_mapping",
+            "train_params": {"nquantiles": 15},
+        },
+    }
+    return cfg
