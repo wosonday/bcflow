@@ -8,7 +8,7 @@ from datetime import date
 import pytest
 from pydantic import ValidationError
 
-from bcflow.config_schema import HistSimSourceConfig, PeriodsConfig
+from bcflow.config_schema import PeriodsConfig
 from bcflow.pipeline import run_pipeline
 
 
@@ -37,25 +37,15 @@ def test_unquoted_yaml_years_and_dates_are_accepted():
     should not have to know that and quote them."""
     p = PeriodsConfig.model_validate({"calibration": [2000, date(2012, 12, 31)]})
     assert p.calibration == ("2000", "2012-12-31")
-    src = HistSimSourceConfig.model_validate(
-        {
-            "format": "netcdf",
-            "path": "x.nc",
-            "hist_period": [1980, 2014],
-            "sim_period": [2015, 2100],
-        }
-    )
-    assert src.hist_period == ("1980", "2014")
 
 
 def test_out_of_sample_evaluation_with_validation_period(toy_config):
     cfg = copy.deepcopy(toy_config)
-    for v in cfg["variables"]:
-        v["periods"] = {"calibration": ["2000", "2012"], "validation": ["2013", "2020"]}
+    cfg["periods"] = {"calibration": ["2000", "2012"], "validation": ["2013", "2020"]}
 
     out = run_pipeline(cfg)
 
-    for name in ("tasmax", "pr"):
+    for name in ("tmax", "precip"):
         res = out["results"][name]
         table = res["evaluation"]
         assert {"mean_bias", "sd_ratio", "qq_rmse", "rmse"} <= set(table["metric"])
@@ -68,31 +58,30 @@ def test_out_of_sample_evaluation_with_validation_period(toy_config):
         assert {f"evaluation:{name}:calibration", f"evaluation:{name}:validation"} <= {
             c.name for c in out["qa"]
         }
-    assert "wet_day_freq_diff" in set(out["results"]["pr"]["evaluation"]["metric"])
+    assert "wet_day_freq_diff" in set(out["results"]["precip"]["evaluation"]["metric"])
     assert not any(c.name.endswith(":in_sample") for c in out["qa"])
-    done = next(c for c in out["qa"] if c.name == "train_adjust:tasmax:done")
+    done = next(c for c in out["qa"] if c.name == "train_adjust:tmax:done")
     assert done.context["calibration"]["start"].startswith("2000")
     assert done.context["calibration"]["end"].startswith("2012")
 
 
 def test_without_periods_evaluation_is_in_sample_and_flagged(toy_config):
     out = run_pipeline(toy_config)
-    assert set(out["results"]["tasmax"]["evaluation"]["period"]) == {"calibration"}
+    assert set(out["results"]["tmax"]["evaluation"]["period"]) == {"calibration"}
     assert any(
-        c.name == "evaluation:tasmax:in_sample" and c.status == "warn"
+        c.name == "evaluation:tmax:in_sample" and c.status == "warn"
         for c in out["qa"]
     )
 
 
-def test_calibration_period_outside_data_fails_that_variable_only(toy_config):
+def test_calibration_period_outside_data_fails_clearly(toy_config):
     cfg = copy.deepcopy(toy_config)
-    cfg["variables"][0]["periods"] = {"calibration": ["1950", "1960"]}
+    cfg["periods"] = {"calibration": ["1950", "1960"]}
 
     out = run_pipeline(cfg)
 
-    assert out["results"]["tasmax"] is None
-    assert out["results"]["pr"] is not None
+    assert out["results"] == {"tmax": None, "precip": None}
     assert any(
-        c.name == "periods:tasmax:ref:calibration_empty" and c.status == "fail"
+        c.name == "periods:tmax:ref:calibration_empty" and c.status == "fail"
         for c in out["qa"]
     )

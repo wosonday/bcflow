@@ -42,33 +42,33 @@ def test_write_run_writes_every_variable_qa_and_manifest(toy_config, tmp_path):
     )
     variables = manifest["variables"]
     assert {name: v["status"] for name, v in variables.items()} == {
-        "tasmax": "ok",
-        "pr": "ok",
+        "tmax": "ok",
+        "precip": "ok",
     }
     # Relative paths: the run folder stays valid when moved or shared.
-    assert variables["tasmax"]["scen"] == {
-        "netcdf": "tasmax/scen.nc",
-        "csv": "tasmax/scen.csv",
+    assert variables["tmax"]["scen"] == {
+        "netcdf": "tmax/scen.nc",
+        "csv": "tmax/scen.csv",
     }
-    assert variables["pr"]["adj"] == "pr/adj.nc"
-    assert variables["pr"]["evaluation"] == "pr/evaluation.csv"
-    assert variables["pr"]["hist_eval"] == {
-        "netcdf": "pr/hist_eval.nc",
-        "csv": "pr/hist_eval.csv",
+    assert variables["precip"]["adj"] == "precip/adj.nc"
+    assert variables["precip"]["evaluation"] == "precip/evaluation.csv"
+    assert variables["precip"]["hist_eval"] == {
+        "netcdf": "precip/hist_eval.nc",
+        "csv": "precip/hist_eval.csv",
     }
 
-    with xr.open_dataset(run_dir / "tasmax" / "scen.nc") as ds:
-        assert "tasmax" in ds.data_vars
-        assert ds.sizes["station"] == out["results"]["tasmax"]["scen"].sizes["station"]
+    with xr.open_dataset(run_dir / "tmax" / "scen.nc") as ds:
+        assert "tmax" in ds.data_vars
+        assert ds.sizes["station"] == out["results"]["tmax"]["scen"].sizes["station"]
 
-    csv = pd.read_csv(run_dir / "pr" / "scen.csv", index_col="time")
-    assert len(csv) == out["results"]["pr"]["scen"].sizes["time"]
+    csv = pd.read_csv(run_dir / "precip" / "scen.csv", index_col="time")
+    assert len(csv) == out["results"]["precip"]["scen"].sizes["time"]
 
-    evaluation = pd.read_csv(run_dir / "pr" / "evaluation.csv")
+    evaluation = pd.read_csv(run_dir / "precip" / "evaluation.csv")
     assert {"period", "station", "metric", "raw", "corrected", "improved"} <= set(
         evaluation.columns
     )
-    hist_csv = pd.read_csv(run_dir / "pr" / "hist_eval.csv")
+    hist_csv = pd.read_csv(run_dir / "precip" / "hist_eval.csv")
     assert list(hist_csv.columns) == [
         "time",
         "station",
@@ -77,7 +77,7 @@ def test_write_run_writes_every_variable_qa_and_manifest(toy_config, tmp_path):
         "raw",
         "corrected",
     ]
-    with xr.open_dataset(run_dir / "pr" / "hist_eval.nc") as ds:
+    with xr.open_dataset(run_dir / "precip" / "hist_eval.nc") as ds:
         assert {"obs", "raw", "corrected"} <= set(
             ds.data_vars
         ) and "period" in ds.coords
@@ -90,33 +90,33 @@ def test_failed_variable_is_listed_in_manifest_and_others_still_written(
     toy_config, tmp_path
 ):
     bad = copy.deepcopy(toy_config)
-    bad["variables"][0]["method"] = "does_not_exist"
+    bad["correction"]["tmax"]["method"] = "does_not_exist"
     out = run_pipeline(bad)
 
     manifest_path = write_run(out, OutputConfig(path=str(tmp_path)))
     variables = _read_json(manifest_path)["variables"]
 
-    assert variables["tasmax"] == {"status": "failed"}
-    assert variables["pr"]["status"] == "ok"
-    assert not (manifest_path.parent / "tasmax").exists()
-    assert (manifest_path.parent / "pr" / "scen.nc").is_file()
+    assert variables["tmax"] == {"status": "failed"}
+    assert variables["precip"]["status"] == "ok"
+    assert not (manifest_path.parent / "tmax").exists()
+    assert (manifest_path.parent / "precip" / "scen.nc").is_file()
 
 
 def test_write_failure_is_isolated_and_reported_in_qa(toy_config, tmp_path):
-    """tasmax gets an extra dimension, so its CSV cannot be written; pr must
+    """tmax gets an extra dimension, so its CSV cannot be written; precip must
     still be written and the failure must be visible in out['qa']."""
     out = run_pipeline(toy_config)
-    out["results"]["tasmax"]["scen"] = out["results"]["tasmax"]["scen"].expand_dims(
+    out["results"]["tmax"]["scen"] = out["results"]["tmax"]["scen"].expand_dims(
         extra=[0]
     )
 
     manifest_path = write_run(out, OutputConfig(path=str(tmp_path), formats=["csv"]))
     variables = _read_json(manifest_path)["variables"]
 
-    assert variables["tasmax"] == {"status": "failed"}
-    assert variables["pr"]["status"] == "ok"
+    assert variables["tmax"] == {"status": "failed"}
+    assert variables["precip"]["status"] == "ok"
     assert any(
-        c.name == "writers:tasmax:exception" and c.status == "fail" for c in out["qa"]
+        c.name == "writers:tmax:exception" and c.status == "fail" for c in out["qa"]
     )
 
 
@@ -145,7 +145,7 @@ def test_cli_writes_outputs_relative_to_config_file(toy_config, tmp_path):
     run_dirs = list((tmp_path / "results").iterdir())
     assert len(run_dirs) == 1
     assert (
-        _read_json(run_dirs[0] / "manifest.json")["variables"]["tasmax"]["status"]
+        _read_json(run_dirs[0] / "manifest.json")["variables"]["tmax"]["status"]
         == "ok"
     )
 

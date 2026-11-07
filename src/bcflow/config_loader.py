@@ -12,7 +12,7 @@ from typing import Any
 
 import yaml
 
-_PATH_KEYS = {"path", "metadata_path"}
+_PATH_KEYS = {"path", "metadata", "data_dir", "hist", "sim"}
 
 
 def _resolve_paths(node: Any, base: Path) -> Any:
@@ -36,14 +36,9 @@ def load_config_file(path: str | Path) -> dict:
     """Read config.yaml and resolve every relative path against the file's
     own directory (not the cwd).
 
-    Deliberately does NOT call config_schema.load_config() here: that would
-    validate the WHOLE PipelineConfig at once, and pydantic raises on the
-    first invalid VariableConfig for the ENTIRE model -- which would undo
-    pipeline.run_pipeline()'s per-variable error isolation (one variable's
-    config mistake, e.g. a missing adapt_freq_thresh, would stop every other
-    variable from running too). Full-document validation stays available
-    separately via config_schema.load_config(), for contexts that want
-    fail-fast behaviour (e.g. a future --validate CLI flag, or tests).
+    Returns the raw dict; validating it is config_schema.load_config()'s job.
+    Path-valued keys (_PATH_KEYS) are made absolute; a '{var}' placeholder
+    in model.hist / model.sim is kept as-is.
     """
     cfg_path = Path(path)
     if not cfg_path.is_file():

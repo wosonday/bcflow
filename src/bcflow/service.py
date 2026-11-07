@@ -22,9 +22,11 @@ from pydantic import ValidationError
 
 from ._version import bcflow_version
 from .config_loader import load_config_file
-from .config_schema import OutputConfig, PipelineConfig, VariableConfig
+from .config_schema import PipelineConfig, load_config
+from .loaders import load_station_metadata, station_file
 from .methods import METHOD_REGISTRY
 from .pipeline import EventHandler, run_pipeline
+from .variables import VARIABLES
 from .writers import write_run
 
 __all__ = [
@@ -58,29 +60,57 @@ def config_json_schema() -> dict:
 
 # --- validate ---------------------------------------------------------------
 
-def _pydantic_errors(exc: ValidationError, *, variable: str | None, prefix: list) -> list[dict]:
-    return [{"variable": variable, "loc": [*prefix, *e["loc"]], "message": e["msg"]} for e in exc.errors()]
+def _variable_of(loc: list) -> str | None:
+    """The variable an error belongs to, when its location names one."""
+    return next((str(x) for x in loc if x in VARIABLES), None)
 
 
-def _semantic_errors(var_cfg: VariableConfig) -> list[dict]:
-    """Checks the schema alone cannot do: registered method, existing inputs."""
-    name, errors = var_cfg.name, []
-    if var_cfg.method not in METHOD_REGISTRY:
-        errors.append({
-            "variable": name,
-            "loc": ["method"],
-            "message": f"Method '{var_cfg.method}' is not registered. Valid methods: {sorted(METHOD_REGISTRY)}.",
-        })
+def _pydantic_errors(exc: ValidationError) -> list[dict]:
+    out = []
+    for e in exc.errors():
+        loc = list(e["loc"])
+        out.append({"variable": _variable_of(loc), "loc": loc, "message": e["msg"]})
+    return out
 
-    ref = var_cfg.data.ref
-    expected = [(["data", "ref", "metadata_path"], ref.metadata_path), (["data", "ref", "path"], ref.path)]
-    for role in ("hist", "sim", "hist_sim"):
-        src = getattr(var_cfg.data, role)
-        if src is not None:
-            expected.append((["data", role, "path"], src.path))
-    for loc, path in expected:
-        if not Path(path).exists():
-            errors.append({"variable": name, "loc": loc, "message": f"Path not found: {path}"})
+
+def _semantic_errors(cfg: PipelineConfig) -> list[dict]:
+    """Checks the schema alone cannot do: registered methods, existing inputs."""
+    errors: list[dict] = []
+    for v in cfg.variables:
+        method = cfg.spec(v).method
+        if method not in METHOD_REGISTRY:
+            errors.append({
+                "variable": v,
+                "loc": ["correction", v, "method"],
+                "message": f"Method '{method}' is not registered. Valid methods: {sorted(METHOD_REGISTRY)}.",
+            })
+
+    st = cfg.stations
+    missing = [key for key in ("metadata", "data_dir") if not Path(getattr(st, key)).exists()]
+    for key in missing:
+        errors.append({"variable": None, "loc": ["stations", key], "message": f"Path not found: {getattr(st, key)}"})
+    if not missing:
+        try:
+            meta = load_station_metadata(st)
+        except (OSError, ValueError) as exc:
+            errors.append({"variable": None, "loc": ["stations", "metadata"], "message": str(exc)})
+        else:
+            if not any(station_file(st, str(sid), str(row["name"])).is_file() for sid, row in meta.iterrows()):
+                errors.append({
+                    "variable": None,
+                    "loc": ["stations", "file_pattern"],
+                    "message": f"No station file matches '{st.file_pattern}' in {st.data_dir}.",
+                })
+
+    seen: set[str] = set()
+    for v in cfg.variables:
+        for which in ("hist", "sim"):
+            path = cfg.model.path(which, v)
+            if path in seen:
+                continue
+            seen.add(path)
+            if not Path(path).exists():
+                errors.append({"variable": v, "loc": ["model", which], "message": f"Path not found: {path}"})
     return errors
 
 
@@ -91,40 +121,22 @@ def validate_config_file(path: str | Path) -> dict:
     all of them at once. Returns
         {"valid": bool, "variables": [name, ...],
          "errors": [{"variable": name | None, "loc": [...], "message": str}]}
-    where `loc` is the path to the offending field, e.g. ["data", "hist", "path"].
+    where `loc` is the path to the offending field, e.g. ["model", "hist"].
     """
     try:
         raw = load_config_file(path)
     except ValueError as exc:
         return {"valid": False, "variables": [], "errors": [{"variable": None, "loc": [], "message": str(exc)}]}
 
-    errors: list[dict] = []
+    listed = raw.get("variables")
+    names = [str(v) for v in listed] if isinstance(listed, list) else []
     try:
-        OutputConfig.model_validate(raw.get("output") or {})
+        cfg = load_config(raw)
     except ValidationError as exc:
-        errors += _pydantic_errors(exc, variable=None, prefix=["output"])
+        return {"valid": False, "variables": names, "errors": _pydantic_errors(exc)}
 
-    variables = raw.get("variables")
-    if not isinstance(variables, list) or not variables:
-        errors.append({"variable": None, "loc": ["variables"], "message": "the 'variables' key is missing or the list is empty."})
-        variables = []
-
-    names: list[str] = []
-    for i, item in enumerate(variables):
-        name = (item.get("name") if isinstance(item, dict) else None) or f"<variable {i + 1}>"
-        names.append(str(name))
-        try:
-            var_cfg = VariableConfig.model_validate(item)
-        except ValidationError as exc:
-            errors += _pydantic_errors(exc, variable=str(name), prefix=[])
-            continue
-        errors += _semantic_errors(var_cfg)
-
-    duplicated = sorted({n for n in names if names.count(n) > 1})
-    if duplicated:
-        errors.append({"variable": None, "loc": ["variables"], "message": f"variable names must be unique; duplicated: {duplicated}."})
-
-    return {"valid": not errors, "variables": names, "errors": errors}
+    errors = _semantic_errors(cfg)
+    return {"valid": not errors, "variables": [str(v) for v in cfg.variables], "errors": errors}
 
 
 # --- inspect ----------------------------------------------------------------
@@ -175,8 +187,9 @@ def _inspect_raster(p: Path) -> dict:
 def _inspect_table(p: Path) -> dict:
     df = pd.read_csv(p)
     info: dict[str, Any] = {"kind": "table", "path": str(p), "columns": [str(c) for c in df.columns], "n_rows": int(len(df)), "time": None}
-    if "time" in df.columns:
-        t = pd.to_datetime(df["time"], errors="coerce").dropna()
+    date_col = next((c for c in df.columns if str(c).strip().lower() in ("date", "time")), None)
+    if date_col is not None:
+        t = pd.to_datetime(df[date_col], errors="coerce").dropna()
         if len(t):
             info["time"] = {"start": t.min().strftime("%Y-%m-%d"), "end": t.max().strftime("%Y-%m-%d"), "n": int(len(t)), "calendar": "standard"}
     return info
@@ -197,8 +210,8 @@ def inspect_path(path: str | Path) -> dict:
     """Describe a data file or folder so a user can fill in the config.
 
     Raster (.nc / .zarr): variables with dims, units; coords; time range.
-    Table (.csv): columns, row count, time range of a 'time' column.
-    Folder of .csv (layout 'long'): station names + one sample file.
+    Table (.csv): columns, row count, time range of a 'date' (or 'time') column.
+    Folder of .csv (one file per station): file names + one sample file.
     Raises FileNotFoundError / ValueError for a missing or unsupported path.
     """
     p = Path(path)
@@ -252,22 +265,22 @@ def run_config_file(path: str | Path, on_event: EventHandler | None = None) -> d
     Returns {"status": "ok" | "failed" | "error", "exit_code": 0 | 1 | 2,
              "error": str | None, "run_dir", "manifest", "variables": {name: "ok" | "failed"},
              "counts": {"pass", "warn", "fail"}, "qa": [check, ...]}.
-    exit_code 2 / status "error" means the run could not start (or its
-    output folder could not be created); 1 means it ran with failures.
+    exit_code 2 / status "error" means the run could not start (invalid
+    config, or its output folder could not be created); 1 means it ran with failures.
     """
     emit = on_event or (lambda event: None)
     try:
         raw = load_config_file(path)
-        # A bad 'output' section is a whole-run error, so it is checked before
-        # any variable is computed. pydantic's ValidationError is a ValueError.
-        output_cfg = OutputConfig.model_validate(raw.get("output") or {})
-        out = run_pipeline(raw, on_event=emit)
+        # The whole config is validated before any variable is computed;
+        # pydantic's ValidationError is a ValueError.
+        cfg = load_config(raw)
+        out = run_pipeline(cfg, on_event=emit)
     except ValueError as exc:
         return _summary(None, None, error=str(exc))
 
     n_before = len(out["qa"])
     try:
-        manifest = write_run(out, output_cfg, config=raw)
+        manifest = write_run(out, cfg.output, config=raw)
     except OSError as exc:
         return _summary(out, None, error=f"Cannot create the output folder: {exc}")
 

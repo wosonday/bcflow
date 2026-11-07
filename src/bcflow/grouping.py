@@ -1,92 +1,83 @@
-"""Build the xsdba Grouper from config, and auto-detect lat/lon dimension names.
+"""Build the xsdba Grouper of a variable, and find the lat/lon names of a grid.
 
-The alias-dict pattern (instead of scanning a candidate list) is ported from
-`swatprep/core/weather.py::station_column()` (repo wosonday/swat-preprocessing):
-every column/dimension name is normalised to ONE canonical name through a
-fixed mapping, which avoids false ambiguity when a dataset carries both an
-original name and its alias (having both 'lat' and 'latitude' is not a conflict).
+Grouping decides which days are corrected together (one transfer function
+per group):
+
+    "month"      12 groups, Jan..Dec -- the default;
+    "dayofyear"  365/366 groups, each pooled with the days within
+                 +-window//2 of it (a moving window, e.g. window=31), which
+                 gives a smooth seasonal cycle without monthly steps;
+    "none"       one group for the whole year.
 """
 
 from __future__ import annotations
 
-from typing import Any, Hashable
+from collections.abc import Hashable
 
 import xarray as xr
 from xsdba.base import Grouper
 
 from .qa import QACheck
+from .variables import VariableSpec
 
-# Aliases for spatial dimension names -- extend this mapping for a new
-# convention instead of adding if/elif branches.
-_LATLON_ALIASES = {
-    "latitude": "lat",
-    "nav_lat": "lat",
-    "y_latitude": "lat",
-    "y": "lat",
-    "longitude": "lon",
-    "nav_lon": "lon",
-    "x_longitude": "lon",
-    "x": "lon",
-}
+# Names tried in order when lat_name/lon_name is "auto". The order matters:
+# a curvilinear grid has 2-D 'lat'/'lon' coords AND 1-D 'y'/'x' index dims,
+# and the true geographic coords must win.
+_LAT_NAMES = ("lat", "latitude", "nav_lat", "y_latitude", "y")
+_LON_NAMES = ("lon", "longitude", "nav_lon", "x_longitude", "x")
 
 
-def _canonical(name: str) -> str:
-    key = name.strip().lower()
-    return _LATLON_ALIASES.get(key, key)
+def build_grouper(spec: VariableSpec) -> Grouper:
+    """xsdba Grouper for spec.group ("dayofyear" | "month" | "none")."""
+    if spec.group == "dayofyear":
+        return Grouper("time.dayofyear", window=spec.window)
+    if spec.group == "month":
+        return Grouper("time.month")
+    if spec.group == "none":
+        return Grouper("time")
+    raise ValueError(  # unreachable after pydantic validation
+        f"Invalid group {spec.group!r} for '{spec.name}'. Valid groups: dayofyear, month, none."
+    )
 
 
-def build_grouper(var_cfg) -> str | Grouper:
-    """Build xsdba.base.Grouper from VariableConfig.group (validated by pydantic)."""
-    g = var_cfg.group
-    name = f"{g.dim}.{g.prop}" if g.prop else g.dim
-    return Grouper(name, window=g.window, add_dims=g.add_dims)
+def _find(available: dict[str, Hashable], declared: str, candidates: tuple[str, ...]) -> Hashable | None:
+    if declared != "auto":
+        return available.get(declared.strip().lower())
+    return next((available[c] for c in candidates if c in available), None)
 
 
 def resolve_latlon_dims(
-    da: xr.DataArray, grid_cfg, qa: list[QACheck], *, source_label: str = ""
-) -> tuple[Hashable | Any, Hashable | Any]:
-    """Return the (lat_dim, lon_dim) names that exist in da.
+    da: xr.DataArray,
+    lat_name: str,
+    lon_name: str,
+    qa: list[QACheck],
+    *,
+    source_label: str,
+) -> tuple[Hashable, Hashable]:
+    """Return the names of da's latitude and longitude coordinates.
 
-    Absolute priority: lat_dim/lon_dim declared explicitly in config.
-    Otherwise every existing dim/coord is normalised through the alias dict
-    to find the canonical 'lat'/'lon'. Not declared and not found -> clear fail.
+    A declared name (not "auto") is used as given (case-insensitive);
+    "auto" tries the usual names in _LAT_NAMES / _LON_NAMES.
     """
-    tag = f" ({source_label})" if source_label else ""
-    available = set(da.coords) | set(da.dims)
-    canon_to_actual = {_canonical(n): n for n in available}
+    available = {str(n).strip().lower(): n for n in (*da.coords, *da.dims)}
+    lat = _find(available, lat_name, _LAT_NAMES)
+    lon = _find(available, lon_name, _LON_NAMES)
 
-    lat_dim = grid_cfg.lat_dim
-    lon_dim = grid_cfg.lon_dim
-    auto_used = []
-
-    if lat_dim is None:
-        lat_dim = canon_to_actual.get("lat")
-        if lat_dim:
-            auto_used.append(f"lat_dim='{lat_dim}'")
-    if lon_dim is None:
-        lon_dim = canon_to_actual.get("lon")
-        if lon_dim:
-            auto_used.append(f"lon_dim='{lon_dim}'")
-
-    if lat_dim is None or lon_dim is None:
-        qa.append(QACheck(
-            name=f"grouping:latlon_not_found{tag}",
-            status="fail",
-            message=(
-                f"Could not detect lat/lon{tag}. "
-                f"Found: {sorted(available)}. "
-                "Accepted: lat/latitude/nav_lat/y_latitude and lon/longitude/nav_lon/x_longitude. "
-                "Please set lat_dim/lon_dim in the config."
-            ),
-            context={"available": sorted(available)},
-        ))
-        raise ValueError(f"Could not detect lat/lon{tag} -- see QACheck 'grouping:latlon_not_found{tag}'.")
-
-    if auto_used:
-        qa.append(QACheck(
-            name=f"grouping:latlon_auto_detected{tag}",
-            status="pass",
-            message=f"Auto-detected spatial dimensions{tag}: {', '.join(auto_used)}.",
-        ))
-
-    return lat_dim, lon_dim
+    if lat is None or lon is None:
+        found = sorted(str(n) for n in available.values())
+        qa.append(
+            QACheck(
+                name=f"grid:{source_label}:latlon_not_found",
+                status="fail",
+                message=(
+                    f"Could not find latitude/longitude in {source_label} "
+                    f"(lat_name={lat_name!r}, lon_name={lon_name!r}). Found: {found}. "
+                    "Set model.lat_name / model.lon_name in the config."
+                ),
+                context={"variable": source_label.split(":")[0], "available": found},
+            )
+        )
+        raise ValueError(
+            f"Could not find lat/lon in {source_label} -- see QACheck 'grid:{source_label}:latlon_not_found'."
+        )
+    return lat, lon

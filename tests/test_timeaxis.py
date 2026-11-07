@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import copy
-
 import numpy as np
 import pandas as pd
 import pytest
@@ -86,17 +84,14 @@ def test_no_common_days_is_rejected_clearly():
 def test_pipeline_runs_with_midday_model_stamps(toy_config, toy_paths):
     """Regression test for the CNRM-ESM2-1 case: model stamps at 12:00 used to
     make xsdba fail with 'operands could not be broadcast together'."""
-    for key in ("pr_hist", "pr_sim"):
+    for key in ("hist_pr", "sim_pr"):
         with xr.open_dataset(toy_paths[key]) as ds:
             ds = ds.load()
         ds = ds.assign_coords(time=ds.indexes["time"] + pd.Timedelta(hours=12))
         ds.to_netcdf(toy_paths[key])
-    cfg = copy.deepcopy(toy_config)
-    cfg["variables"] = [cfg["variables"][1]]  # pr, with adapt_freq
+    cfg = {**toy_config, "variables": ["precip"], "correction": {"precip": toy_config["correction"]["precip"]}}
 
     out = run_pipeline(cfg)
 
-    assert out["results"]["pr"] is not None, [
-        c.message for c in out["qa"] if c.status == "fail"
-    ]
-    assert out["results"]["pr"]["scen"]["time"].dt.hour.max() == 0
+    assert out["results"]["precip"] is not None, [c.message for c in out["qa"] if c.status == "fail"]
+    assert out["results"]["precip"]["scen"]["time"].dt.hour.max() == 0

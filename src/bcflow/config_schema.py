@@ -1,14 +1,22 @@
 """Pydantic schema for config.yaml.
 
-Goal: configuration errors (missing field, wrong type, adapt_freq=true
-without adapt_freq_thresh, both hist_sim and hist/sim declared...) must
-surface as soon as the config is validated -- before any data file is
-opened -- with a message naming the offending field.
+Input conventions follow swat-preprocessing (swatprep), so the same station
+files serve both tools:
 
-Note: method names are NOT checked against METHOD_REGISTRY here, but in
-adjust.py (via methods.py), so this module does not depend on xsdba and can
-be used on its own (e.g. by a frontend form validating input before
-sending it to the backend).
+    stations:   metadata CSV `id, name, lat, lon[, elev]` + one CSV per
+                station (`file_pattern`) with `date, precip, tmax, ...`
+    variables:  which swatprep variables to correct
+    model:      GCM files for hist and sim; `{var}` in a path is replaced by
+                the variable's name in `var_map` (one file per variable, as
+                in CMIP), a path without `{var}` is one file holding them all
+    periods:    calibration / validation years, shared by every variable
+    correction: optional per-variable overrides of the defaults in variables.py
+    output:     where and in which formats to write the results
+
+Goal: configuration errors must surface as soon as the config is validated
+-- before any data file is opened -- with a message naming the field.
+Method names are NOT checked against METHOD_REGISTRY here (that needs
+xsdba), so this module stays light enough to validate a frontend form.
 """
 
 from __future__ import annotations
@@ -17,7 +25,16 @@ from datetime import date, datetime
 from typing import Annotated, Any, Literal
 
 import pandas as pd
-from pydantic import BaseModel, BeforeValidator, Field, model_validator
+from pydantic import (
+    BaseModel,
+    BeforeValidator,
+    ConfigDict,
+    Field,
+    field_validator,
+    model_validator,
+)
+
+from .variables import VariableSpec, resolve
 
 
 def _as_date_text(value: Any) -> Any:
@@ -33,55 +50,57 @@ def _as_date_text(value: Any) -> Any:
 # An ISO date or a prefix of one: "2000", "2000-06", "2000-06-15".
 DateText = Annotated[str, BeforeValidator(_as_date_text)]
 
-
-class GroupConfig(BaseModel):
-    dim: str = "time"
-    prop: Literal["dayofyear", "month", "season"] | None = None
-    window: int = 1
-    add_dims: list[str] = Field(default_factory=list)
+# Must list the same names as variables.VARIABLES (guarded by a test).
+VariableName = Literal["precip", "tmax", "tmin", "wind", "solar", "humidity"]
 
 
-class RefPointConfig(BaseModel):
-    station_layout: Literal["long", "wide"]
-    metadata_path: str
-    path: str
-    match_key: str = "name"
+class StationsConfig(BaseModel):
+    """Station observations, in swatprep layout."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    metadata: str  # CSV: id, name, lat, lon[, elev]
+    data_dir: str  # one CSV per station: date, precip, tmax, tmin, ...
+    file_pattern: str = "{id}.csv"  # or "{name}.csv"
+
+    @field_validator("file_pattern")
+    @classmethod
+    def _has_placeholder(cls, value: str) -> str:
+        if "{id}" not in value and "{name}" not in value:
+            raise ValueError("file_pattern must contain {id} or {name}, e.g. '{id}.csv'.")
+        return value
 
 
-class RasterSourceConfig(BaseModel):
-    format: Literal["netcdf", "zarr"]
-    path: str
-    grid_type: Literal["regular_latlon", "rotated_pole"] = "regular_latlon"
-    lat_dim: str | None = None
-    lon_dim: str | None = None
+class ModelConfig(BaseModel):
+    """The climate model to correct (NetCDF or Zarr)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    hist: str  # historical run; may contain {var}
+    sim: str  # run to correct (e.g. a scenario); may contain {var}
+    var_map: dict[VariableName, str]  # swatprep name -> name in the file
+    lat_name: str = "auto"
+    lon_name: str = "auto"
+    time_name: str = "auto"
+    search_radius: int = Field(1, ge=0, le=5)  # cells; used when the nearest cell is empty
+
+    def path(self, which: Literal["hist", "sim"], variable: str) -> str:
+        """File of `variable` for the hist or sim run."""
+        return getattr(self, which).replace("{var}", self.var_map[variable])  # type: ignore[index]
 
 
-class HistSimSourceConfig(RasterSourceConfig):
-    hist_period: tuple[DateText, DateText]
-    sim_period: tuple[DateText, DateText]
+class CorrectionConfig(BaseModel):
+    """Overrides of one variable's defaults (see variables.py); all optional."""
 
+    model_config = ConfigDict(extra="forbid")
 
-class VariableDataConfig(BaseModel):
-    ref: RefPointConfig
-    hist: RasterSourceConfig | None = None
-    sim: RasterSourceConfig | None = None
-    hist_sim: HistSimSourceConfig | None = None
-
-    @model_validator(mode="after")
-    def _exactly_one_source_mode(self) -> "VariableDataConfig":
-        has_split = self.hist is not None and self.sim is not None
-        has_combined = self.hist_sim is not None
-        if has_split and has_combined:
-            raise ValueError(
-                "data: cannot declare both 'hist_sim' and the 'hist'/'sim' pair -- choose one."
-            )
-        if not has_split and not has_combined:
-            raise ValueError(
-                "data: must declare EITHER the 'hist' + 'sim' pair OR 'hist_sim' (combined source)."
-            )
-        if (self.hist is None) != (self.sim is None):
-            raise ValueError("data: 'hist' and 'sim' must be declared together, not just one of them.")
-        return self
+    method: str | None = None
+    group: Literal["dayofyear", "month", "none"] | None = None
+    window: int | None = Field(None, ge=1)
+    adapt_freq: bool | None = None
+    adapt_freq_thresh: str | None = None
+    train_params: dict[str, Any] | None = None
+    adjust_params: dict[str, Any] | None = None
 
 
 def _span(period: tuple[str, str], field: str) -> tuple[pd.Timestamp, pd.Timestamp]:
@@ -89,7 +108,9 @@ def _span(period: tuple[str, str], field: str) -> tuple[pd.Timestamp, pd.Timesta
     try:
         start, end = pd.Period(period[0]).start_time, pd.Period(period[1]).end_time
     except ValueError:
-        raise ValueError(f"periods.{field}: invalid date in {list(period)}; use e.g. '2000' or '2000-01-31'.") from None
+        raise ValueError(
+            f"periods.{field}: invalid date in {list(period)}; use e.g. '2000' or '2000-01-31'."
+        ) from None
     if start > end:
         raise ValueError(f"periods.{field}: start {period[0]!r} is after end {period[1]!r}.")
     return start, end
@@ -103,11 +124,13 @@ class PeriodsConfig(BaseModel):
                  overlap calibration. Without it, evaluation is in-sample.
     """
 
+    model_config = ConfigDict(extra="forbid")
+
     calibration: tuple[DateText, DateText] | None = None
     validation: tuple[DateText, DateText] | None = None
 
     @model_validator(mode="after")
-    def _ordered_and_disjoint(self) -> "PeriodsConfig":
+    def _ordered_and_disjoint(self) -> PeriodsConfig:
         if self.validation is not None and self.calibration is None:
             raise ValueError(
                 "periods: validation requires calibration -- otherwise training would use "
@@ -117,30 +140,9 @@ class PeriodsConfig(BaseModel):
         if len(spans) == 2:
             (c0, c1), (v0, v1) = spans["calibration"], spans["validation"]
             if c0 <= v1 and v0 <= c1:
-                raise ValueError("periods: calibration and validation overlap; validation must use other years.")
-        return self
-
-
-class VariableConfig(BaseModel):
-    name: str
-    method: str
-    kind: Literal["+", "*"]
-    units: str = ""
-    adapt_freq: bool = False
-    adapt_freq_thresh: str | None = None
-    group: GroupConfig = Field(default_factory=GroupConfig)
-    train_params: dict = Field(default_factory=dict)
-    adjust_params: dict = Field(default_factory=dict)
-    periods: PeriodsConfig = Field(default_factory=PeriodsConfig)
-    data: VariableDataConfig
-
-    @model_validator(mode="after")
-    def _adapt_freq_needs_threshold(self) -> "VariableConfig":
-        if self.adapt_freq and not self.adapt_freq_thresh:
-            raise ValueError(
-                f"variables[name={self.name!r}]: adapt_freq=true but 'adapt_freq_thresh' is missing "
-                "(e.g. '0.05 mm d-1')."
-            )
+                raise ValueError(
+                    "periods: calibration and validation overlap; validation must use other years."
+                )
         return self
 
 
@@ -158,13 +160,48 @@ class OutputConfig(BaseModel):
     default "outputs" is used as-is, i.e. relative to the current directory.
     """
 
+    model_config = ConfigDict(extra="forbid")
+
     path: str = "outputs"
     formats: list[OutputFormat] = Field(default_factory=lambda: ["netcdf"], min_length=1)
 
 
 class PipelineConfig(BaseModel):
-    variables: list[VariableConfig] = Field(min_length=1)
+    model_config = ConfigDict(extra="forbid")
+
+    stations: StationsConfig
+    variables: list[VariableName] = Field(min_length=1)
+    model: ModelConfig
+    periods: PeriodsConfig = Field(default_factory=PeriodsConfig)
+    correction: dict[VariableName, CorrectionConfig] = Field(default_factory=dict)
     output: OutputConfig = Field(default_factory=OutputConfig)
+
+    @model_validator(mode="after")
+    def _consistent(self) -> PipelineConfig:
+        duplicated = sorted({v for v in self.variables if self.variables.count(v) > 1})
+        if duplicated:
+            raise ValueError(f"variables: listed more than once: {duplicated}.")
+        unmapped = [v for v in self.variables if v not in self.model.var_map]
+        if unmapped:
+            raise ValueError(
+                f"model.var_map has no entry for {unmapped}; add e.g. "
+                "{precip: pr, tmax: tasmax, tmin: tasmin}."
+            )
+        unused = sorted(set(self.correction) - set(self.variables))
+        if unused:
+            raise ValueError(f"correction: {unused} not in variables {self.variables}.")
+        for v in self.variables:
+            spec = self.spec(v)
+            if spec.adapt_freq and not spec.adapt_freq_thresh:
+                raise ValueError(
+                    f"correction.{v}: adapt_freq=true needs 'adapt_freq_thresh' (e.g. '1 mm d-1')."
+                )
+        return self
+
+    def spec(self, variable: str) -> VariableSpec:
+        """Defaults of `variable` merged with its `correction:` overrides."""
+        override = self.correction.get(variable)  # type: ignore[call-overload]
+        return resolve(variable, override.model_dump(exclude_none=True) if override else None)
 
 
 def load_config(raw: dict) -> PipelineConfig:

@@ -1,7 +1,8 @@
 from .cli import main
 from .adjust import run_variable
 from .pipeline import run_pipeline
-from .config_schema import OutputConfig, PipelineConfig, VariableConfig, load_config
+from .config_schema import OutputConfig, PipelineConfig, load_config
+from .variables import DEFAULTS, VARIABLES, VariableSpec
 from .qa import QACheck, all_pass, failures, warnings_only
 from .writers import write_run
 
@@ -13,7 +14,9 @@ __all__ = [
     "load_config",
     "OutputConfig",
     "PipelineConfig",
-    "VariableConfig",
+    "VariableSpec",
+    "VARIABLES",
+    "DEFAULTS",
     "QACheck",
     "all_pass",
     "failures",

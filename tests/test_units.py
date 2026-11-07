@@ -70,17 +70,17 @@ def test_harmonize_without_declared_units_uses_hist_units_and_warns():
 
 def test_pipeline_corrects_kelvin_model_data_like_celsius(toy_config, toy_paths):
     """Same data, model side stored in K: the correction must not change."""
-    cfg = copy.deepcopy(toy_config)
-    cfg["variables"] = [cfg["variables"][0]]  # tasmax only
-    baseline = run_pipeline(cfg)["results"]["tasmax"]["scen"]
+    cfg = {**copy.deepcopy(toy_config), "variables": ["tmax"]}
+    del cfg["correction"]["precip"]
+    baseline = run_pipeline(cfg)["results"]["tmax"]["scen"]
 
-    for key in ("tasmax_hist", "tasmax_sim"):
+    for key in ("hist_tasmax", "sim_tasmax"):
         with xr.open_dataset(toy_paths[key]) as ds:
             ds = ds.load()
         ds["tasmax"] = (ds["tasmax"] + 273.15).assign_attrs(units="K")
         ds.to_netcdf(toy_paths[key])
 
     out = run_pipeline(cfg)
-    np.testing.assert_allclose(out["results"]["tasmax"]["scen"].values, baseline.values, atol=1e-6)
-    summary = next(c for c in out["qa"] if c.name == "units:tasmax:summary")
+    np.testing.assert_allclose(out["results"]["tmax"]["scen"].values, baseline.values, atol=1e-6)
+    summary = next(c for c in out["qa"] if c.name == "units:tmax:summary")
     assert summary.context["converted"] == {"hist": "K", "sim": "K"}
