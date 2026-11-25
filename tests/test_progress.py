@@ -433,11 +433,8 @@ def test_cli_second_sigint_forces_exit_and_restores_handler(
         assert control.cancelled is True
         assert issubclass(cli._ForcedCancellation, BaseException)
         assert not issubclass(cli._ForcedCancellation, (Exception, KeyboardInterrupt))
-        try:
-            handler(signal.SIGINT, None)
-        except cli._ForcedCancellation:
-            # Let the CLI handle the same exception raised by the second interrupt.
-            raise
+        # Let the CLI handle the same exception raised by the second interrupt.
+        handler(signal.SIGINT, None)
 
         pytest.fail("The second interrupt must not return")
 

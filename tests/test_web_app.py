@@ -545,7 +545,9 @@ def test_methods_table_frame_surfaces_family_variables_projection_and_extras():
 def test_configure_methods_expander_renders_badges_with_alt(manager, config_path):
     app = _open(_app(), config_path)
     columns = {"Method", "Family", "Variables", "Projection", "Extra", "Summary"}
-    elements = [element for element in app.dataframe if set(element.value.columns) == columns]
+    elements = [
+        element for element in app.dataframe if set(element.value.columns) == columns
+    ]
     assert len(elements) == 1
     table = elements[0].value
 

@@ -1,14 +1,13 @@
 """Execute the documented Bash/CI guards in isolated Git fixtures."""
 
 import os
-from pathlib import Path
 import re
 import shutil
 import subprocess
-from tempfile import TemporaryDirectory
 import textwrap
 import unittest
-
+from pathlib import Path
+from tempfile import TemporaryDirectory
 
 ROOT = Path(__file__).resolve().parents[1]
 GIT_BASH = Path(os.environ.get("ProgramFiles", "C:/Program Files")) / "Git/bin/bash.exe"
@@ -20,7 +19,7 @@ def examples() -> list[tuple[str, str]]:
     scripts = []
     for relative in ("docs/ESLINT-CI-GUARDRAILS.md",):
         text = (ROOT / relative).read_text(encoding="utf-8")
-        bash = re.findall(r"```bash\n(.*?)\n```", text, re.S)
+        bash = re.findall(r"```bash\n(.*?)\n```", text, re.DOTALL)
         if len(bash) != 1:
             raise AssertionError(f"{relative}: expected one Bash bypass guard")
         scripts.append((relative + ":bash", bash[0]))
@@ -28,11 +27,13 @@ def examples() -> list[tuple[str, str]]:
         lines = textwrap.dedent(ci).splitlines()
         if not lines[0].startswith("BASE_REF="):
             raise AssertionError(f"{relative}: expected CI base assignment")
-        scripts.append((relative + ":ci", '\n'.join(['BASE_REF="$1"', *lines[1:]])))
+        scripts.append((relative + ":ci", "\n".join(['BASE_REF="$1"', *lines[1:]])))
     return scripts
 
 
-@unittest.skipUnless(BASH and GIT, "Git and Bash are needed to run the documented shell examples")
+@unittest.skipUnless(
+    BASH and GIT, "Git and Bash are needed to run the documented shell examples"
+)
 class GuardrailExampleTests(unittest.TestCase):
     def setUp(self):
         self.temp = TemporaryDirectory(prefix="harness-guard-")
@@ -47,7 +48,13 @@ class GuardrailExampleTests(unittest.TestCase):
             "GIT_COMMITTER_NAME": "Harness Fixture",
             "GIT_COMMITTER_EMAIL": "fixture@example.invalid",
         }
-        for name in ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_CONFIG", "GIT_CONFIG_COUNT"):
+        for name in (
+            "GIT_DIR",
+            "GIT_WORK_TREE",
+            "GIT_INDEX_FILE",
+            "GIT_CONFIG",
+            "GIT_CONFIG_COUNT",
+        ):
             self.env.pop(name, None)
         self.git("init", "--quiet", "--initial-branch=main")
         self.write("README.txt", "fixture\n")
@@ -56,10 +63,23 @@ class GuardrailExampleTests(unittest.TestCase):
 
     def git(self, *args):
         result = subprocess.run(
-            [GIT, "-c", "core.hooksPath=" + str(self.root / "no-hooks"),
-             "-c", "commit.gpgsign=false", "-c", "core.autocrlf=false", *args],
-            cwd=self.root, env=self.env, capture_output=True, text=True,
-            encoding="utf-8", check=False, timeout=20,
+            [
+                GIT,
+                "-c",
+                "core.hooksPath=" + str(self.root / "no-hooks"),
+                "-c",
+                "commit.gpgsign=false",
+                "-c",
+                "core.autocrlf=false",
+                *args,
+            ],
+            cwd=self.root,
+            env=self.env,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=False,
+            timeout=20,
         )
         self.assertEqual(result.returncode, 0, result.stderr)
         return result
@@ -80,16 +100,25 @@ class GuardrailExampleTests(unittest.TestCase):
             with self.subTest(example=name):
                 result = subprocess.run(
                     [BASH, "-c", script, "guard-fixture", base or self.base],
-                    cwd=self.root, env=self.env, capture_output=True, text=True,
-                    encoding="utf-8", check=False, timeout=20,
+                    cwd=self.root,
+                    env=self.env,
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    check=False,
+                    timeout=20,
                 )
                 if expected == 0:
-                    self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+                    self.assertEqual(
+                        result.returncode, 0, result.stderr + result.stdout
+                    )
                 elif base is not None:
                     self.assertNotEqual(result.returncode, 0, result.stdout)
                     self.assertIn("fatal:", result.stderr)
                 else:
-                    self.assertEqual(result.returncode, 1, result.stderr + result.stdout)
+                    self.assertEqual(
+                        result.returncode, 1, result.stderr + result.stdout
+                    )
                     self.assertRegex(
                         result.stdout + result.stderr,
                         r"CI GATE ERROR|LỖI CỔNG CI|::error::",
@@ -144,18 +173,33 @@ class GuardrailExampleTests(unittest.TestCase):
     def run_skill_dispatch(self, selected_skills):
         text = (ROOT / "HERDR-CORE-BOT.md").read_text(encoding="utf-8")
         section = text.split("### 1.5.", 1)[1]
-        script = re.search(r"```bash\n(.*?)\n```", section, re.S)[1]
+        script = re.search(r"```bash\n(.*?)\n```", section, re.DOTALL)[1]
         self.write(".agents/bot/dispatch.sh", script)
-        self.write(".agents/bot.env", f'PROJECT_DIR="{self.root.as_posix()}"\nWT_DIR=.wt\nBASE_BRANCH=main\nMANAGER=fixture\n')
-        self.write(".agents/tasks/skill-test.md", f"tier: nhanh\nskills: {selected_skills}\n")
+        self.write(
+            ".agents/bot.env",
+            f'PROJECT_DIR="{self.root.as_posix()}"\nWT_DIR=.wt\nBASE_BRANCH=main\nMANAGER=fixture\n',
+        )
+        self.write(
+            ".agents/tasks/skill-test.md", f"tier: nhanh\nskills: {selected_skills}\n"
+        )
         (self.root / ".wt/skill-test").mkdir(parents=True)
         # Intercept only the external agent launcher; execute the documented script.
         invocation = 'agm() { printf "%s\\n" "$@"; }; export -f agm; bash .agents/bot/dispatch.sh skill-test'
-        return subprocess.run([BASH, "-c", invocation], cwd=self.root, env=self.env,
-                              capture_output=True, text=True, encoding="utf-8", timeout=20)
+        return subprocess.run(
+            [BASH, "-c", invocation],
+            check=False,
+            cwd=self.root,
+            env=self.env,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            timeout=20,
+        )
 
     def test_dispatch_accepts_explicit_third_required_skill(self):
-        selected = "systematic-debugging, rust-best-practices, verification-before-completion"
+        selected = (
+            "systematic-debugging, rust-best-practices, verification-before-completion"
+        )
         result = self.run_skill_dispatch(selected)
         self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
         for skill in selected.split(", "):

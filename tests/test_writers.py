@@ -31,9 +31,16 @@ def test_netcdf_sanitizes_multivariate_metadata_without_mutating_source(tmp_path
     source = xr.Dataset(
         {"af": ("multivar", [1.5, 2.0], {"options": {"n_iter": 2}, "enabled": True})},
         coords={"multivar": np.array(["tmax", "precip"], dtype=object)},
-        attrs={"missing": None, "flag": np.bool_(False), "parameters": {"group": "time"}},
+        attrs={
+            "missing": None,
+            "flag": np.bool_(False),
+            "parameters": {"group": "time"},
+        },
     )
-    source.multivar.attrs = {"_units": ["degC", "mm d-1"], "_standard_name": [None, None]}
+    source.multivar.attrs = {
+        "_units": ["degC", "mm d-1"],
+        "_standard_name": [None, None],
+    }
     original = source.copy(deep=True)
     path = tmp_path / "adj.nc"
     assert _write_netcdf(source, path) == path
@@ -171,8 +178,7 @@ def test_cli_writes_outputs_relative_to_config_file(toy_config, tmp_path):
     run_dirs = list((tmp_path / "results").iterdir())
     assert len(run_dirs) == 1
     assert (
-        _read_json(run_dirs[0] / "manifest.json")["variables"]["tmax"]["status"]
-        == "ok"
+        _read_json(run_dirs[0] / "manifest.json")["variables"]["tmax"]["status"] == "ok"
     )
 
 

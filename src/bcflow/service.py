@@ -13,8 +13,9 @@ so the result can be printed as JSON as-is:
 from __future__ import annotations
 
 import json
+from collections.abc import Collection
 from pathlib import Path
-from typing import Any, Collection
+from typing import Any
 
 import pandas as pd
 import xarray as xr
@@ -59,9 +60,7 @@ def config_json_schema() -> dict:
 # --- validate ---------------------------------------------------------------
 
 
-def _variable_of(
-    loc: list, known_variables: Collection[str] = VARIABLES
-) -> str | None:
+def _variable_of(loc: list, known_variables: Collection[str] = VARIABLES) -> str | None:
     """The variable an error belongs to, when its location names one."""
     return next((str(x) for x in loc if x in known_variables), None)
 
@@ -268,7 +267,9 @@ def _semantic_errors(cfg: PipelineConfig) -> list[dict]:
                     prefix=["correction", v],
                     variable=v,
                     n_vars=1,
-                    has_train_params=bool(override is not None and override.train_params),
+                    has_train_params=bool(
+                        override is not None and override.train_params
+                    ),
                     check_projection=False,
                     min_vars_hint=(
                         f"Method '{method}' requires at least {meta.min_vars} "

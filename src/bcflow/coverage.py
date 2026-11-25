@@ -65,14 +65,8 @@ def coverage_table(ref_cal: xr.DataArray) -> pd.DataFrame:
     """
     total = int(ref_cal.sizes["time"])
     valid = np.asarray(ref_cal.notnull().sum("time").values, dtype=int)
-    return pd.DataFrame(
-        {
-            "station": [str(s) for s in ref_cal["station"].values],
-            "valid_days": valid,
-            "total_days": total,
-            "coverage": valid / total if total else np.zeros(len(valid)),
-            "valid_years": valid / _DAYS_PER_YEAR,
-        }
+    return coverage_table_from_counts(
+        [str(s) for s in ref_cal["station"].values], valid, total
     )
 
 

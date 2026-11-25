@@ -7,7 +7,6 @@ import importlib.util
 import pickle
 from dataclasses import replace
 from pathlib import Path
-from types import SimpleNamespace
 
 import numpy as np
 import pandas as pd
@@ -17,7 +16,14 @@ import xsdba
 import xsdba.adjustment as xsdba_adj
 
 from bcflow import adjust
-from bcflow.cell import STACK_DIM, CellPlan, CellResult, PostStep, adjust_trained, run_cell
+from bcflow.cell import (
+    STACK_DIM,
+    CellPlan,
+    CellResult,
+    PostStep,
+    adjust_trained,
+    run_cell,
+)
 from bcflow.config_schema import PostConfig, TargetConfig, load_config
 from bcflow.preprocess import SEED, ZeroHandling
 from bcflow.progress import RunCancelled, RunControl
@@ -79,17 +85,27 @@ def test_multivariate_random_rotations_are_reproducible(method, seed):
     sim = _make_dataset(years=1, start="2030-01-01", seed=153)
     params = (("n_iter", 2), ("n_escore", -1), ("base_kws", {"nquantiles": 10}))
     plan = CellPlan(
-        target_name="joint", variables=("tmax", "precip"), method=method, group="none",
+        target_name="joint",
+        variables=("tmax", "precip"),
+        method=method,
+        group="none",
         train_params=params if method == "mbcn" else (),
         adjust_params=params if method == "npdf_transform" else (),
     )
     outputs = []
     for global_seed in (999, 54321):
         np.random.seed(global_seed)
-        outputs.append(run_cell(
-            plan, ref=ref, hist=hist, sim=sim,
-            specs=_specs("tmax", "precip"), units=_units("tmax", "precip"), seed=seed,
-        ))
+        outputs.append(
+            run_cell(
+                plan,
+                ref=ref,
+                hist=hist,
+                sim=sim,
+                specs=_specs("tmax", "precip"),
+                units=_units("tmax", "precip"),
+                seed=seed,
+            )
+        )
     first, second = outputs
     xr.testing.assert_equal(first.scen, second.scen)
     for name in plan.variables:
@@ -249,15 +265,15 @@ def test_loci_injects_thresh_via_registry_defaults():
 
 
 def test_loci_defaults_interp_nearest_on_string_station_coords():
-    ref = _make_dataset(years=2, start="2000-01-01", seed=34, dry_frac=0.4).assign_coords(
-        station=["ST01", "ST02"]
-    )
-    hist = _make_dataset(years=2, start="2000-01-01", seed=35, dry_frac=0.7).assign_coords(
-        station=["ST01", "ST02"]
-    )
-    sim = _make_dataset(years=2, start="2030-01-01", seed=36, dry_frac=0.6).assign_coords(
-        station=["ST01", "ST02"]
-    )
+    ref = _make_dataset(
+        years=2, start="2000-01-01", seed=34, dry_frac=0.4
+    ).assign_coords(station=["ST01", "ST02"])
+    hist = _make_dataset(
+        years=2, start="2000-01-01", seed=35, dry_frac=0.7
+    ).assign_coords(station=["ST01", "ST02"])
+    sim = _make_dataset(
+        years=2, start="2030-01-01", seed=36, dry_frac=0.6
+    ).assign_coords(station=["ST01", "ST02"])
 
     plan = CellPlan(
         target_name="precip",
@@ -386,7 +402,9 @@ def test_adjust_trained_reuses_post_trained_without_retraining(monkeypatch):
     assert len(res.post_trained) == 1
 
     def _no_retrain(*args, **kwargs):
-        raise AssertionError("ExtremeValues.train should not be called when post_trained is supplied")
+        raise AssertionError(
+            "ExtremeValues.train should not be called when post_trained is supplied"
+        )
 
     monkeypatch.setattr(xsdba_adj.ExtremeValues, "train", classmethod(_no_retrain))
 
@@ -408,8 +426,7 @@ def test_adjust_trained_reuses_post_trained_without_retraining(monkeypatch):
     )
     xr.testing.assert_equal(scen, res.scen)
     assert any(
-        c.name == "post:precip:extreme_values" and c.status == "pass"
-        for c in eval_qa
+        c.name == "post:precip:extreme_values" and c.status == "pass" for c in eval_qa
     )
 
 
@@ -646,7 +663,13 @@ def test_otc_projection_rejection_and_mocked_non_projection(monkeypatch):
         assert "group" in kwargs
         return hist_arg.copy()
 
-    monkeypatch.setattr(xsdba_adj.OTC, "adjust", classmethod(lambda cls, ref_a, hist_a, **kw: fake_otc_adjust(ref_a, hist_a, **kw)))
+    monkeypatch.setattr(
+        xsdba_adj.OTC,
+        "adjust",
+        classmethod(
+            lambda cls, ref_a, hist_a, **kw: fake_otc_adjust(ref_a, hist_a, **kw)
+        ),
+    )
 
     plan_noproj = CellPlan(
         target_name="precip_tmax",
@@ -991,7 +1014,10 @@ def test_run_target_univariate_parity_stations_and_grid(
     )
     raw_grid = copy.deepcopy(grid_config)
     raw_grid["grid"].update(region={"lat": [15, 16], "lon": [105, 107]}, block_size=3)
-    raw_grid["periods"] = {"calibration": ["2000", "2001"], "validation": ["2002", "2002"]}
+    raw_grid["periods"] = {
+        "calibration": ["2000", "2001"],
+        "validation": ["2002", "2002"],
+    }
     cfg_gr = load_config(raw_grid)
     target_tmax = cfg_gr.resolved_targets()[0]
     res_var_g = adjust.run_variable(cfg_gr, "tmax", [])
@@ -1013,10 +1039,24 @@ def test_run_target_early_method_validation_before_loading(toy_config, monkeypat
     cfg = load_config(toy_config)
 
     bad_targets = [
-        (TargetConfig(name="t_unk", variables=["tmax", "precip"], method="nope"), "method:t_unk:unknown"),
-        (TargetConfig(name="t_post", variables=["tmax"], method="extreme_values"), "method:t_post:invalid_family"),
-        (TargetConfig(name="t_arity", variables=["tmax"], method="mbcn", group="none"), "method:t_arity:min_vars"),
-        (TargetConfig(name="t_uni", variables=["tmax", "precip"], method="scaling"), "method:t_uni:univariate_only"),
+        (
+            TargetConfig(name="t_unk", variables=["tmax", "precip"], method="nope"),
+            "method:t_unk:unknown",
+        ),
+        (
+            TargetConfig(name="t_post", variables=["tmax"], method="extreme_values"),
+            "method:t_post:invalid_family",
+        ),
+        (
+            TargetConfig(
+                name="t_arity", variables=["tmax"], method="mbcn", group="none"
+            ),
+            "method:t_arity:min_vars",
+        ),
+        (
+            TargetConfig(name="t_uni", variables=["tmax", "precip"], method="scaling"),
+            "method:t_uni:univariate_only",
+        ),
         (
             TargetConfig(
                 name="t_bad_post",
@@ -1043,10 +1083,14 @@ def test_run_target_early_method_validation_before_loading(toy_config, monkeypat
     with pytest.raises(ValueError, match="does not support projection"):
         adjust.run_target(
             cfg,
-            TargetConfig(name="t_otc", variables=["tmax", "precip"], method="otc", group="none"),
+            TargetConfig(
+                name="t_otc", variables=["tmax", "precip"], method="otc", group="none"
+            ),
             qa_otc,
         )
-    assert any(c.name == "method:t_otc:no_projection" and c.status == "fail" for c in qa_otc)
+    assert any(
+        c.name == "method:t_otc:no_projection" and c.status == "fail" for c in qa_otc
+    )
 
 
 def test_run_target_multivariate_stations_and_intersection(toy_config):
@@ -1078,7 +1122,9 @@ def test_run_target_multivariate_stations_and_intersection(toy_config):
     warn = next(c for c in qa_drop if c.name == "target:joint:station_intersection")
     assert warn.status == "warn"
     assert warn.context["dropped_stations"] == ["ST02"]
-    assert out_drop["tmax"]["scen"].sizes["station"] < out["tmax"]["scen"].sizes["station"]
+    assert (
+        out_drop["tmax"]["scen"].sizes["station"] < out["tmax"]["scen"].sizes["station"]
+    )
 
     # Drop precip from ST01 and tmax from ST03 -> 0 common stations -> fail cleanly.
     st1 = Path(cfg_dict["stations"]["data_dir"]) / "ST01.csv"
@@ -1196,7 +1242,9 @@ def test_run_target_multivariate_grid_parallel_matches_sequential_and_ipc_safe(
 def test_run_target_grid_memory_estimate_uses_max_time_steps(grid_config, monkeypatch):
     raw = copy.deepcopy(grid_config)
     raw.pop("correction", None)
-    raw["grid"].update(region={"lat": [15, 16], "lon": [105, 107]}, block_size=3, workers=1)
+    raw["grid"].update(
+        region={"lat": [15, 16], "lon": [105, 107]}, block_size=3, workers=1
+    )
     raw["periods"] = {"calibration": ["2000", "2001"], "validation": None}
     raw["targets"] = [
         {
@@ -1229,7 +1277,13 @@ def test_run_target_grid_memory_estimate_uses_max_time_steps(grid_config, monkey
 
     def spy_estimate(ref_steps, hist_steps, sim_steps, cells, **kwargs):
         seen_steps.append(
-            (ref_steps, hist_steps, sim_steps, kwargs["n_vars"], kwargs["method_factor"])
+            (
+                ref_steps,
+                hist_steps,
+                sim_steps,
+                kwargs["n_vars"],
+                kwargs["method_factor"],
+            )
         )
         return real_estimate(ref_steps, hist_steps, sim_steps, cells, **kwargs)
 
@@ -1253,3 +1307,43 @@ def test_run_target_grid_memory_estimate_uses_max_time_steps(grid_config, monkey
     )
     assert all(n == 2 and f == 1.5 for _, _, _, n, f in seen_steps)
 
+
+@pytest.mark.parametrize(
+    ("train_params", "adjust_params", "expected"),
+    [
+        ({}, {}, 50),
+        ({"nquantiles": 15}, {}, 15),
+        ({"nquantiles": np.int64(75)}, {}, 75),
+        ({"nquantiles": [0.1, 0.5, 0.9]}, {}, 3),
+        ({"base_kws": {"nquantiles": 200}}, {}, 200),
+        ({}, {"base_kws": {"nquantiles": 10_000}}, 10_000),
+        ({}, {"nquantiles": 300}, 300),
+        ({"nquantiles": 20, "base_kws": {"nquantiles": 400}}, {}, 400),
+        (
+            {"nquantiles": 20, "base_kws": {"nquantiles": 400}},
+            {"nquantiles": 600, "base_kws": {"nquantiles": 500}},
+            600,
+        ),
+        (
+            {"nquantiles": 20},
+            {"base_kws": {"nquantiles": np.linspace(0, 1, 100)}},
+            100,
+        ),
+        (
+            {"base_kws": {"nquantiles": 400}},
+            {"base_kws_vars": {"tmax": {"nquantiles": 800}}},
+            800,
+        ),
+    ],
+)
+def test_grid_quantile_count_uses_largest_known_parameter_path(
+    train_params, adjust_params, expected
+):
+    plan = CellPlan(
+        target_name="joint",
+        variables=("tmax", "precip"),
+        method="npdf_transform",
+        train_params=tuple(train_params.items()),
+        adjust_params=tuple(adjust_params.items()),
+    )
+    assert adjust._quantile_count(plan) == expected

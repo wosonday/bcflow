@@ -518,7 +518,11 @@ def latest_cell_progress(job: dict, variable: str | None = None) -> dict | None:
     if variable is None:
         variable = (job.get("progress") or {}).get("variable")
     cached = job.get("cell_progress")
-    if isinstance(cached, dict) and "total_cells" in cached and cached.get("variable") == variable:
+    if (
+        isinstance(cached, dict)
+        and "total_cells" in cached
+        and cached.get("variable") == variable
+    ):
         return cached
     return next(
         (

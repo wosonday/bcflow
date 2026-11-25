@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
-from make_toy_data import generate_toy_dataset  # noqa: E402
+from make_toy_data import generate_toy_dataset
 
 
 @pytest.fixture

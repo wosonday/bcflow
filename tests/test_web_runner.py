@@ -455,4 +455,7 @@ def test_latest_cell_progress_uses_cached_state_or_events_fallback():
         ],
     }
     assert runner.latest_cell_progress(fallback_job) == fallback_event
-    assert runner.latest_cell_progress({"progress": {"variable": "tmax"}, "events": []}) is None
+    assert (
+        runner.latest_cell_progress({"progress": {"variable": "tmax"}, "events": []})
+        is None
+    )

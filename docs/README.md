@@ -5,6 +5,8 @@ This directory specifies startup commands, permission boundaries, `agm`/`hc` usa
 
 ## Index
 
+bcflow release notes: [CHANGELOG.md](../CHANGELOG.md).
+
 | Document | Model / Tool | Primary Role |
 |---|---|---|
 | [SKILL-ROUTING.md](SKILL-ROUTING.md) | Claude, Codex, agy, OpenCode workers and Copilot | Canonical workflow/domain selection by phase, Ponytail composition, availability checks and Task Brief examples |

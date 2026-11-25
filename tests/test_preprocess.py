@@ -21,7 +21,9 @@ from bcflow.qa import QACheck
 from bcflow.variables import DEFAULTS, VariableSpec
 
 
-def _daily_da(values: np.ndarray, *, units: str = "mm d-1", name: str = "precip") -> xr.DataArray:
+def _daily_da(
+    values: np.ndarray, *, units: str = "mm d-1", name: str = "precip"
+) -> xr.DataArray:
     time = pd.date_range("2000-01-01", periods=len(values), freq="D")
     return xr.DataArray(
         values.astype("float64"),
@@ -132,9 +134,13 @@ def test_resolve_adapt_freq_disabled_returns_none():
 
 
 def test_resolve_adapt_freq_true_without_thresh_raises():
-    spec = VariableSpec(name="tmax", units="degC", kind="+", adapt_freq=True, adapt_freq_thresh=None)
+    spec = VariableSpec(
+        name="tmax", units="degC", kind="+", adapt_freq=True, adapt_freq_thresh=None
+    )
     qdm = get_method_meta("quantile_delta_mapping")
-    with pytest.raises(ValueError, match="adapt_freq=true requires 'adapt_freq_thresh'"):
+    with pytest.raises(
+        ValueError, match="adapt_freq=true requires 'adapt_freq_thresh'"
+    ):
         resolve_adapt_freq(spec, qdm, {})
 
 

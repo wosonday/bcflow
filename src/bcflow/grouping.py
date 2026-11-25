@@ -163,7 +163,9 @@ def sample_size_qa(
     )
 
 
-def _find(available: dict[str, Hashable], declared: str, candidates: tuple[str, ...]) -> Hashable | None:
+def _find(
+    available: dict[str, Hashable], declared: str, candidates: tuple[str, ...]
+) -> Hashable | None:
     if declared != "auto":
         return available.get(declared.strip().lower())
     return next((available[c] for c in candidates if c in available), None)

@@ -203,57 +203,74 @@ def _time_dim(da: xr.DataArray, time_name: str) -> str | None:
     return next((available[c] for c in _TIME_NAMES if c in available), None)
 
 
+def _open_raster_variable(
+    source: ModelConfig | GridReferenceConfig,
+    variable: str,
+    qa: list[QACheck],
+    *,
+    which: str | None = None,
+) -> xr.DataArray:
+    """Open a raster variable with a canonical time axis and source-specific QA."""
+    is_model = isinstance(source, ModelConfig)
+    if isinstance(source, ModelConfig):
+        path = Path(source.path(which, variable))  # type: ignore[arg-type]
+    else:
+        path = Path(source.path)
+    file_var = source.var_map[variable]  # type: ignore[index]
+    kind = "model" if is_model else "grid"
+    label = f"{kind}:{variable}:{which if is_model else 'ref'}"
+    context = {"path": str(path)} if is_model else {}
+    if not path.exists():
+        _fail(
+            qa,
+            f"{label}:missing_file",
+            f"Model {which} file for '{variable}' not found: {path}"
+            if is_model
+            else f"Reference grid not found: {path}",
+            variable,
+            context=context,
+            error=f"Model {which} file not found: {path}" if is_model else None,
+        )
+    ds = _open(path)
+    if file_var not in ds.data_vars:
+        names = sorted(str(v) for v in ds.data_vars)
+        _fail(
+            qa,
+            f"{label}:missing_variable",
+            f"{path.name} has no variable '{file_var}' ({kind}.var_map.{variable}). Found: {names}.",
+            variable,
+            context={**context, "available": names} if is_model else None,
+            error=f"'{file_var}' not in {path.name} -- see QACheck '{label}:missing_variable'."
+            if is_model
+            else None,
+        )
+
+    da = ds[file_var]
+    time = _time_dim(da, source.time_name)
+    if time is None:
+        _fail(
+            qa,
+            f"{label}:time_not_found",
+            (
+                f"No time axis in '{file_var}' of {path.name} (time_name={source.time_name!r}); "
+                f"dims: {[str(d) for d in da.dims]}. Set model.time_name in the config."
+            )
+            if is_model
+            else f"No time axis in '{file_var}' of {path.name}.",
+            variable,
+            context=context,
+            error=f"No time axis in {path.name} -- see QACheck '{label}:time_not_found'."
+            if is_model
+            else None,
+        )
+    return da.rename({time: "time"}) if time != "time" else da
+
+
 def load_model_variable(
     model: ModelConfig, which: str, variable: str, qa: list[QACheck]
 ) -> xr.DataArray:
     """The model field of `variable` from the hist or sim file, time axis named 'time'."""
-    path = Path(model.path(which, variable))  # type: ignore[arg-type]
-    file_var = model.var_map[variable]  # type: ignore[index]
-    label = f"{variable}:{which}"
-    if not path.exists():
-        qa.append(
-            QACheck(
-                name=f"model:{label}:missing_file",
-                status="fail",
-                message=f"Model {which} file for '{variable}' not found: {path}",
-                context={"variable": variable, "path": str(path)},
-            )
-        )
-        raise ValueError(f"Model {which} file not found: {path}")
-    ds = _open(path)
-    if file_var not in ds.data_vars:
-        names = sorted(str(v) for v in ds.data_vars)
-        qa.append(
-            QACheck(
-                name=f"model:{label}:missing_variable",
-                status="fail",
-                message=f"{path.name} has no variable '{file_var}' (model.var_map.{variable}). Found: {names}.",
-                context={"variable": variable, "path": str(path), "available": names},
-            )
-        )
-        raise ValueError(
-            f"'{file_var}' not in {path.name} -- see QACheck 'model:{label}:missing_variable'."
-        )
-
-    da = ds[file_var]
-    time = _time_dim(da, model.time_name)
-    if time is None:
-        qa.append(
-            QACheck(
-                name=f"model:{label}:time_not_found",
-                status="fail",
-                message=(
-                    f"No time axis in '{file_var}' of {path.name} (time_name={model.time_name!r}); "
-                    f"dims: {[str(d) for d in da.dims]}. Set model.time_name in the config."
-                ),
-                context={"variable": variable, "path": str(path)},
-            )
-        )
-        raise ValueError(
-            f"No time axis in {path.name} -- see QACheck 'model:{label}:time_not_found'."
-        )
-    if time != "time":
-        da = da.rename({time: "time"})
+    da = _open_raster_variable(model, variable, qa, which=which)
     override = model.units.get(variable)  # type: ignore[call-overload]
     return da.assign_attrs(units=override) if override else da
 
@@ -270,36 +287,9 @@ def open_grid_reference(
     otherwise from the file, and must be a unit pint understands -- CDO
     often writes the placeholder "var_unit", which must be overridden.
     """
-    path = Path(grid.path)
     label = f"{variable}:ref"
-    file_var = grid.var_map[variable]  # type: ignore[index]
-    if not path.exists():
-        _fail(
-            qa,
-            f"grid:{label}:missing_file",
-            f"Reference grid not found: {path}",
-            variable,
-        )
-    ds = _open(path)
-    if file_var not in ds.data_vars:
-        names = sorted(str(v) for v in ds.data_vars)
-        _fail(
-            qa,
-            f"grid:{label}:missing_variable",
-            f"{path.name} has no variable '{file_var}' (grid.var_map.{variable}). Found: {names}.",
-            variable,
-        )
-    da = ds[file_var]
-    time = _time_dim(da, grid.time_name)
-    if time is None:
-        _fail(
-            qa,
-            f"grid:{label}:time_not_found",
-            f"No time axis in '{file_var}' of {path.name}.",
-            variable,
-        )
-    if time != "time":
-        da = da.rename({time: "time"})
+    da = _open_raster_variable(grid, variable, qa)
+    path, file_var = Path(grid.path), da.name
 
     units = grid.units.get(variable) or da.attrs.get("units", "")  # type: ignore[call-overload]
     try:
@@ -497,10 +487,23 @@ def intersect_grid_masks(masks: Sequence[np.ndarray]) -> np.ndarray:
     return np.logical_and.reduce(masks)
 
 
-def _fail(qa: list[QACheck], name: str, message: str, variable: str) -> NoReturn:
+def _fail(
+    qa: list[QACheck],
+    name: str,
+    message: str,
+    variable: str,
+    *,
+    context: dict | None = None,
+    error: str | None = None,
+) -> NoReturn:
     qa.append(
         QACheck(
-            name=name, status="fail", message=message, context={"variable": variable}
+            name=name,
+            status="fail",
+            message=message,
+            context={"variable": variable, **(context or {})},
         )
     )
-    raise ValueError(f"{message} -- see QACheck '{name}'.")
+    raise ValueError(
+        error if error is not None else f"{message} -- see QACheck '{name}'."
+    )

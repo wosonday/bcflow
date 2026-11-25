@@ -13,7 +13,13 @@ from xsdba.base import Grouper
 
 from .grouping import build_grouper, sample_size_qa
 from .methods import MethodSpec, check_available, get_method
-from .preprocess import SEED, ZeroHandling, apply_adapt_freq, clip_to_bounds, resolve_adapt_freq
+from .preprocess import (
+    SEED,
+    ZeroHandling,
+    apply_adapt_freq,
+    clip_to_bounds,
+    resolve_adapt_freq,
+)
 from .progress import RunControl
 from .qa import QACheck
 from .variables import VariableSpec, resolve_method_params
@@ -220,7 +226,9 @@ def _fill_registry_defaults(
 
     if emit_sample_size_qa and "nquantiles" in train_kws:
         nq_val = train_kws["nquantiles"]
-        nquantiles = int(nq_val) if isinstance(nq_val, (int, np.integer)) else len(nq_val)
+        nquantiles = (
+            int(nq_val) if isinstance(nq_val, (int, np.integer)) else len(nq_val)
+        )
         n_years = max(0, round(ref_t.sizes["time"] / 365.25))
         qa.append(
             sample_size_qa(
@@ -443,9 +451,17 @@ def _finalize(
                 )
             check_available(post_spec)
 
-            post_train = {**dict(post_spec.default_train_params), **dict(step.train_params)}
-            post_adjust = {**dict(post_spec.default_adjust_params), **dict(step.adjust_params)}
-            _inject_registry_defaults(post_spec, plan.variables, specs, post_train, post_adjust)
+            post_train = {
+                **dict(post_spec.default_train_params),
+                **dict(step.train_params),
+            }
+            post_adjust = {
+                **dict(post_spec.default_adjust_params),
+                **dict(step.adjust_params),
+            }
+            _inject_registry_defaults(
+                post_spec, plan.variables, specs, post_train, post_adjust
+            )
 
             post_obj = post_spec.cls.train(ref_t, hist_t, **post_train)
             scen_t = post_obj.adjust(sim_t, scen_t, **post_adjust)
@@ -557,7 +573,9 @@ def run_cell(
         control.check_cancelled()
 
     t0 = monotonic()
-    scen_t, sim_t = _adjust(method, trained, ref_t, hist_t, sim_t, adjust_kws, zeros, seed=seed)
+    scen_t, sim_t = _adjust(
+        method, trained, ref_t, hist_t, sim_t, adjust_kws, zeros, seed=seed
+    )
     timing["adjust"] = round(monotonic() - t0, 6)
 
     t0 = monotonic()
@@ -620,7 +638,9 @@ def adjust_trained(
     _, adjust_kws, _ = _fill_registry_defaults(
         plan, method, specs, ref_t, qa, emit_sample_size_qa=False
     )
-    scen_t, sim_t = _adjust(method, trained_obj, ref_t, hist_t, sim_t, adjust_kws, zeros)
+    scen_t, sim_t = _adjust(
+        method, trained_obj, ref_t, hist_t, sim_t, adjust_kws, zeros
+    )
     scen, _, _ = _finalize(
         scen_t,
         plan=plan,

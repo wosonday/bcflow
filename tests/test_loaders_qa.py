@@ -20,7 +20,10 @@ from bcflow.qa import QACheck
 
 
 def _stations(toy_paths, **changes) -> StationsConfig:
-    fields = {"metadata": str(toy_paths["stations_meta"]), "data_dir": str(toy_paths["weather_dir"])}
+    fields = {
+        "metadata": str(toy_paths["stations_meta"]),
+        "data_dir": str(toy_paths["weather_dir"]),
+    }
     return StationsConfig(**{**fields, **changes})
 
 
@@ -53,7 +56,9 @@ def test_ids_with_leading_zeros_stay_text(toy_paths, tmp_path):
     meta["id"] = ["001", "002", "003"]
     path = tmp_path / "meta.csv"
     meta.to_csv(path, index=False)
-    assert list(load_station_metadata(_stations(toy_paths, metadata=str(path))).index) == [
+    assert list(
+        load_station_metadata(_stations(toy_paths, metadata=str(path))).index
+    ) == [
         "001",
         "002",
         "003",
@@ -62,7 +67,9 @@ def test_ids_with_leading_zeros_stay_text(toy_paths, tmp_path):
 
 def test_metadata_missing_column_is_clear(toy_paths, tmp_path):
     path = tmp_path / "meta.csv"
-    pd.read_csv(toy_paths["stations_meta"]).drop(columns=["lat"]).to_csv(path, index=False)
+    pd.read_csv(toy_paths["stations_meta"]).drop(columns=["lat"]).to_csv(
+        path, index=False
+    )
     with pytest.raises(ValueError, match="lat"):
         load_station_metadata(_stations(toy_paths, metadata=str(path)))
 
@@ -98,9 +105,13 @@ def test_no_station_has_the_variable_fails(toy_paths):
 
 def test_file_pattern_by_name(toy_paths):
     for sid, name in [("ST01", "hanoi"), ("ST02", "danang"), ("ST03", "hcmc")]:
-        (toy_paths["weather_dir"] / f"{sid}.csv").rename(toy_paths["weather_dir"] / f"{name}_daily.csv")
+        (toy_paths["weather_dir"] / f"{sid}.csv").rename(
+            toy_paths["weather_dir"] / f"{name}_daily.csv"
+        )
     qa: list[QACheck] = []
-    da = load_station_variable(_stations(toy_paths, file_pattern="{name}_daily.csv"), "tmax", "degC", qa)
+    da = load_station_variable(
+        _stations(toy_paths, file_pattern="{name}_daily.csv"), "tmax", "degC", qa
+    )
     assert da.sizes["station"] == 3
 
 
@@ -132,7 +143,10 @@ def test_model_file_per_variable(toy_paths):
 
 def test_model_single_file_with_all_variables(toy_paths, tmp_path):
     merged = tmp_path / "all_vars_hist.nc"
-    with xr.open_dataset(toy_paths["hist_pr"]) as pr, xr.open_dataset(toy_paths["hist_tasmax"]) as tx:
+    with (
+        xr.open_dataset(toy_paths["hist_pr"]) as pr,
+        xr.open_dataset(toy_paths["hist_tasmax"]) as tx,
+    ):
         xr.merge([pr, tx]).to_netcdf(merged)
     model = _model(toy_paths, hist=str(merged))
 
@@ -143,7 +157,9 @@ def test_model_single_file_with_all_variables(toy_paths, tmp_path):
 def test_model_missing_file_fails_clearly(toy_paths, tmp_path):
     qa: list[QACheck] = []
     with pytest.raises(ValueError, match="not found"):
-        load_model_variable(_model(toy_paths, sim=str(tmp_path / "nope_{var}.nc")), "sim", "precip", qa)
+        load_model_variable(
+            _model(toy_paths, sim=str(tmp_path / "nope_{var}.nc")), "sim", "precip", qa
+        )
     assert qa[-1].name == "model:precip:sim:missing_file" and qa[-1].status == "fail"
 
 
@@ -151,7 +167,9 @@ def test_model_missing_variable_fails_clearly(toy_paths):
     qa: list[QACheck] = []
     # one file for every variable, without {var}: the file exists, the name does not
     model = _model(
-        toy_paths, hist=str(toy_paths["hist_pr"]), var_map={"precip": "precipitation", "tmax": "tasmax"}
+        toy_paths,
+        hist=str(toy_paths["hist_pr"]),
+        var_map={"precip": "precipitation", "tmax": "tasmax"},
     )
     with pytest.raises(ValueError, match="precipitation"):
         load_model_variable(model, "hist", "precip", qa)

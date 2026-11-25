@@ -13,9 +13,9 @@ from pathlib import Path
 
 import pytest
 import yaml
+from make_toy_data import generate_toy_dataset
 
 from bcflow.cli import main
-from make_toy_data import generate_toy_dataset
 
 
 def _write_config(tmp_path: Path, cfg: dict) -> Path:
@@ -129,7 +129,8 @@ def test_validate_reports_train_params_on_adjust_only_method(
 
 
 @pytest.mark.skipif(
-    importlib.util.find_spec("ot") is not None, reason="the optional POT package is installed"
+    importlib.util.find_spec("ot") is not None,
+    reason="the optional POT package is installed",
 )
 def test_validate_reports_missing_pot_with_the_other_input_errors(
     toy_config, tmp_path, capsys
@@ -191,7 +192,9 @@ def test_validate_accepts_season_post_and_custom_variables(
     assert set(result["variables"]) == {"tmax", "precip", "cloud"}
 
 
-def test_validate_names_a_custom_variable_in_schema_errors(toy_config, tmp_path, capsys):
+def test_validate_names_a_custom_variable_in_schema_errors(
+    toy_config, tmp_path, capsys
+):
     bad = copy.deepcopy(toy_config)
     bad["custom_variables"] = {
         "cloud": {"units": "fraction", "kind": "*"}  # '*' needs a lower bound
@@ -206,7 +209,6 @@ def test_validate_names_a_custom_variable_in_schema_errors(toy_config, tmp_path,
     )
     assert error["variable"] == "cloud"
     assert error["loc"][:2] == ["custom_variables", "cloud"]
-
 
 
 def test_run_json_streams_events_then_a_summary(toy_config, tmp_path, capsys):
@@ -379,7 +381,9 @@ def test_validate_reports_otc_non_projection_and_missing_pot_on_targets(
     monkeypatch.setattr(
         importlib.util,
         "find_spec",
-        lambda name, *args, **kwargs: None if name == "ot" else real_find_spec(name, *args, **kwargs),
+        lambda name, *args, **kwargs: (
+            None if name == "ot" else real_find_spec(name, *args, **kwargs)
+        ),
     )
 
     assert main(["validate", str(_write_config(tmp_path, bad)), "--json"]) == 1

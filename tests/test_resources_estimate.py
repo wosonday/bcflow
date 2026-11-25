@@ -56,9 +56,7 @@ def test_baseline_is_paid_once_not_per_variable_or_method():
     baseline_only = resources.estimate_task_bytes(0, 0, 0, 0)
     assert baseline_only == BASELINE
     assert resources.estimate_task_bytes(0, 0, 0, 0, n_vars=4) == BASELINE
-    assert (
-        resources.estimate_task_bytes(0, 0, 0, 0, method_factor=2.0) == BASELINE
-    )
+    assert resources.estimate_task_bytes(0, 0, 0, 0, method_factor=2.0) == BASELINE
 
 
 @pytest.mark.parametrize("n_vars", [2, 3])
@@ -87,9 +85,12 @@ def test_method_memory_factor_exactly_matches_the_registry():
 
 
 @pytest.mark.parametrize(
-    "method, factor", [("mbcn", 2.0), ("npdf_transform", 2.0), ("principal_components", 1.5)]
+    "method, factor",
+    [("mbcn", 2.0), ("npdf_transform", 2.0), ("principal_components", 1.5)],
 )
-def test_monotonic_scaling_with_method_factor_keeps_baseline_unmultiplied(method, factor):
+def test_monotonic_scaling_with_method_factor_keeps_baseline_unmultiplied(
+    method, factor
+):
     assert resources.method_memory_factor(method) == factor
     single = resources.estimate_task_bytes(1000, 2000, 3000, 10000)
     scaled = resources.estimate_task_bytes(
@@ -145,7 +146,9 @@ def test_select_workers_reduces_concurrency_as_load_grows(host):
     for selection, estimate in zip(selections, estimates, strict=True):
         assert selection.estimated_task_bytes == estimate
         assert selection.memory_limit == max(1, budget // estimate)
-        assert selection.workers == min(selection.cpu_limit, selection.memory_limit, 100)
+        assert selection.workers == min(
+            selection.cpu_limit, selection.memory_limit, 100
+        )
 
 
 def test_method_factor_never_breaks_finite_estimates():

@@ -28,7 +28,9 @@ def _show_summary(job: dict) -> None:
     else:
         variables = summary.get("variables", {})
         if variables:
-            render_variable_status_table(variables, alt="Final status of each corrected variable")
+            render_variable_status_table(
+                variables, alt="Final status of each corrected variable"
+            )
         if summary.get("run_dir"):
             st.code(summary["run_dir"], language=None)
             st.caption(
@@ -38,7 +40,10 @@ def _show_summary(job: dict) -> None:
         if checks:
             with st.expander("QA checks"):
                 st.dataframe(
-                    qa_checks_frame(checks), hide_index=True, width="stretch", alt="Run quality-assurance checks"
+                    qa_checks_frame(checks),
+                    hide_index=True,
+                    width="stretch",
+                    alt="Run quality-assurance checks",
                 )
         if summary.get("error"):
             st.error(summary["error"])
@@ -55,8 +60,13 @@ def _render_monitor_body(manager, history: list[dict]) -> None:
         st.session_state[SessionKeys.MONITOR_TRACKING] = tracked
     if st.session_state.get(SessionKeys.JOB_CHOICE) not in ids:
         st.session_state[SessionKeys.JOB_CHOICE] = ids[0]
-    labels = {job["id"]: f"{job['kind']} · {job['status']} · {job['created_at']}" for job in history}
-    selected = st.selectbox("Job", ids, format_func=lambda value: labels[value], key=SessionKeys.JOB_CHOICE)
+    labels = {
+        job["id"]: f"{job['kind']} · {job['status']} · {job['created_at']}"
+        for job in history
+    }
+    selected = st.selectbox(
+        "Job", ids, format_func=lambda value: labels[value], key=SessionKeys.JOB_CHOICE
+    )
     job = next((item for item in history if item["id"] == selected), None)
     if job is None:
         st.warning("This job is no longer in the in-memory history.")
@@ -64,14 +74,19 @@ def _render_monitor_body(manager, history: list[dict]) -> None:
     st.subheader(f"{job['kind'].capitalize()} · {job['status']}")
     with st.container(horizontal=True):
         st.metric("Elapsed", f"{job['elapsed_seconds']:.1f} s")
-        st.metric("Exit code", "—" if job["returncode"] is None else str(job["returncode"]))
+        st.metric(
+            "Exit code", "—" if job["returncode"] is None else str(job["returncode"])
+        )
     if job["active"]:
         if job["status"] == "cancelling":
             st.warning(
                 "Cancellation requested. Waiting for the current operation; completed variables will be saved."
             )
         if st.button(
-            "Request cancellation", icon=":material/stop_circle:", key=f"cancel_{selected}", disabled=job["status"] == "cancelling"
+            "Request cancellation",
+            icon=":material/stop_circle:",
+            key=f"cancel_{selected}",
+            disabled=job["status"] == "cancelling",
         ):
             try:
                 manager.request_cancel(selected)
@@ -81,7 +96,9 @@ def _render_monitor_body(manager, history: list[dict]) -> None:
     elif job["status"] == "ok":
         st.success("Job completed successfully.")
     elif job["status"] == "cancelled":
-        st.warning("Job cancelled. Only completed work confirmed by the backend is available.")
+        st.warning(
+            "Job cancelled. Only completed work confirmed by the backend is available."
+        )
     else:
         st.error(job.get("error") or "The job did not complete successfully.")
 
@@ -114,7 +131,9 @@ def _render_monitor_body(manager, history: list[dict]) -> None:
     _show_summary(job)
     st.caption(f"Job artifacts: {job['job_dir']}")
     with st.expander("Diagnostic log", expanded=bool(job.get("error"))):
-        st.code(job.get("logs") or "No diagnostic output.", language=None, wrap_lines=True)
+        st.code(
+            job.get("logs") or "No diagnostic output.", language=None, wrap_lines=True
+        )
     with st.expander("Recent structured events"):
         st.json(job.get("events", [])[-20:], expanded=False)
 

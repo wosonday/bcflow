@@ -4,6 +4,8 @@ Pipeline hiệu chỉnh sai số khí hậu/thủy văn (bias correction), xây 
 [xsdba](https://github.com/Ouranosinc/xsdba), điều khiển bằng một file cấu hình
 YAML hoặc JSON thay vì sửa code Python trực tiếp.
 
+Các thay đổi của bản 0.2.0: [CHANGELOG.md](CHANGELOG.md).
+
 ## Streamlit frontend
 
 The local web app lives in [`app/`](app/README.md), alongside `src/`, not inside
@@ -23,7 +25,7 @@ path/snapshot behavior.
 ## Rust learning project
 
 The Rust/GPUI project is preserved only in
-[`learning/rust-desktop/`](learning/rust-desktop/README.md), with its native
+`learning/rust-desktop/`, with its native
 connection milestone and Rust walkthrough. The duplicate `desktop/` folder and
 its obsolete CI workflow have been removed. Streamlit in `app/` is the current
 scientific-workflow frontend.
@@ -147,6 +149,8 @@ Config mẫu trong `configs/`:
 | ---------------------------- | ---------------------- | -------------------------------------------- |
 | `example_toy.yaml` / `.json` | trạm (bố cục swatprep) | toy, sinh bằng `scripts/make_toy_data.py`    |
 | `example_grid.yaml`          | lưới quan trắc 0,5°    | toy, sinh bằng `scripts/make_toy_data.py`    |
+| `example_multivariate_stations.yaml` | trạm, nhiều biến cùng lúc | cùng dữ liệu toy |
+| `example_post_extreme_values.yaml` | trạm, QDM rồi hiệu chỉnh cực trị | cùng dữ liệu toy |
 | `cnrm_obs_vietnam.yaml`      | lưới OBS.Vietnam 0,1°  | thật: `data/OBS.Vietnam.1980-2014.nc` + CNRM |
 
 ## Dữ liệu đầu vào
@@ -214,6 +218,178 @@ khác `bilinear`. Kết quả `scen.nc`, `hist_eval.nc` có dạng `(time, lat, 
 tham chiếu; ô không có số liệu (biển) để trống. CSV (nếu chọn) ở dạng dài
 `time, lat, lon, giá trị`, chỉ gồm các ô được hiệu chỉnh — file có thể rất lớn.
 
+## Chọn phương pháp
+
+Bảng sau sinh từ `bcflow.discovery.list_methods()`; `Variables` là số biến tối
+thiểu (`min_vars`), `Projection` cho biết có thể hiệu chỉnh `sim` ngoài mẫu hay
+không. `bcflow methods --json` cung cấp cùng metadata cho chương trình đọc.
+
+<!-- method-catalog:start -->
+| Name | Family | Variables | Projection | Extra |
+|---|---|---|---|---|
+| `empirical_quantile_mapping` | `train_adjust` | 1 | yes | — |
+| `detrended_quantile_mapping` | `train_adjust` | 1 | yes | — |
+| `quantile_delta_mapping` | `train_adjust` | 1 | yes | — |
+| `scaling` | `train_adjust` | 1 | yes | — |
+| `loci` | `train_adjust` | 1 | yes | — |
+| `extreme_values` | `post` | 1 | yes | — |
+| `principal_components` | `train_adjust` | 2 | yes | — |
+| `mbcn` | `train_adjust` | 2 | yes | — |
+| `npdf_transform` | `adjust_only` | 2 | yes | — |
+| `otc` | `adjust_only` | 2 | no | POT |
+| `dotc` | `adjust_only` | 2 | yes | POT |
+<!-- method-catalog:end -->
+
+QDM là mặc định; EQM khớp phân phối lịch sử, DQM loại xu thế trước khi ánh xạ,
+`scaling` hiệu chỉnh mức trung bình, `loci` dành cho cường độ mưa địa phương.
+Dùng `post:` cho `extreme_values`, và `targets:` khi hiệu chỉnh nhiều biến cùng
+lúc. `otc` không hỗ trợ projection nên bị từ chối trong `targets:` có `sim`;
+`otc`/`dotc` cần gói tùy chọn POT. `bcflow validate` kiểm tra family, `min_vars`,
+projection và gói tùy chọn trước khi chạy; phương pháp `adjust_only` không nhận
+`train_params`. Bảng phương pháp trong UI hiển thị các yêu cầu này bằng badge.
+
+Tham số được gộp theo thứ tự: mặc định phương pháp → mặc định biến → giá trị
+người dùng. Mặc định `adjust_params` của biến chỉ áp dụng cho phương pháp quantile;
+tham số người dùng luôn được ưu tiên. Từ 0.2.0, ghi đè
+`correction.<var>.train_params` / `adjust_params` **gộp thêm**, thay vì thay cả dict:
+chẳng hạn chỉ đặt `kind` vẫn giữ `nquantiles=50` của phương pháp quantile mapping.
+
+### Các bước `post:`
+
+Thêm đoạn sau vào config trạm toy (gộp các khóa vào `correction:` hiện có):
+
+```yaml
+correction:
+  precip:
+    post:
+      - method: extreme_values
+        train_params: {cluster_thresh: "1 mm d-1"}
+```
+
+Các bước chạy theo thứ tự sau hiệu chỉnh chính, trước khôi phục ngày khô và
+giới hạn vật lý. `extreme_values` nhận `train_params` và `adjust_params` riêng;
+`cluster_thresh` có thể lấy từ `adapt_freq_thresh` của biến khi không đặt rõ.
+Config đầy đủ: [example_post_extreme_values.yaml](configs/example_post_extreme_values.yaml).
+
+### Nhóm mùa và `pool_dims`
+
+`group` nhận `month`, `dayofyear`, `season` (DJF/MAM/JJA/SON), hoặc `none`.
+Ví dụ gộp thêm các trạm khi ước lượng phân phối theo mùa, trên config trạm toy:
+
+```yaml
+correction:
+  tmax:
+    group: season
+    window: 1
+    pool_dims: [station]
+```
+
+`pool_dims` được chuyển thành `Grouper.add_dims`; chỉ dùng chiều thực sự có trong
+dữ liệu và các điểm có thể dùng chung phân phối. Với lưới, các ô được đưa về chiều
+`station` trong từng block, nên pooling chỉ gộp trong block và phụ thuộc cách chia
+block. `window` tính theo ngày/bước thời gian, không phải số tháng hay mùa;
+giữ `window: 1` với `month`/`season`. `group: none` không cho `window > 1`.
+QA có `grouping:*:sample_size` (cảnh báo khi ít hơn khoảng `3 * nquantiles` mẫu
+mỗi nhóm), `grouping:*:window_units`, và `bounds:*:clipped` / `bounds:*:ok`
+(số giá trị vượt giới hạn hoặc kiểm tra đạt).
+
+### Biến tùy chỉnh (`custom_variables`)
+
+Ngoài `precip`, `tmax`, `tmin`, `wind`, `solar`, `humidity`, khai báo tên biến mới
+với `units` và `kind` (`+` cộng, `*` nhân). Ví dụ dưới đây thay `variables` và
+thêm các khóa vào `model` của config toy; cần dữ liệu riêng có biến `discharge`
+trong CSV trạm và `q` trong file mô hình trước khi chạy:
+
+```yaml
+custom_variables:
+  discharge:
+    units: "m3 s-1"
+    kind: "*"
+    bounds: [0, null]
+variables: [precip, tmax, discharge]
+model:
+  var_map: {discharge: q}
+```
+
+Tên mới phải được khai báo trong `custom_variables`, không trùng tên có sẵn;
+`kind: "*"` bắt buộc có cận dưới không âm. Tên trong `variables`, `correction`,
+`model.var_map` / `model.units`, `grid.var_map` / `grid.units` dùng chung kiểm tra
+này. Với lưới, thêm ánh xạ của biến vào `grid.var_map`.
+
+### Hiệu chỉnh đa biến (`targets:`)
+
+`principal_components`, `mbcn`, `npdf_transform` hỗ trợ cả trạm và lưới, cần ít
+nhất hai biến trong một target. Mọi biến trong `variables:` phải xuất hiện đúng
+một lần trong `targets:` và có ánh xạ mô hình (thêm ánh xạ lưới khi dùng `grid:`).
+Khi có `targets:`, đặt phương pháp, nhóm, pooling, tham số và post-step trên
+target; `correction:` vẫn điều khiển thuộc tính riêng của từng biến như regrid.
+Nếu bỏ `targets:`, pipeline tự tạo một target cho mỗi biến như trước.
+
+Ví dụ trạm dùng Principal Components (đường dẫn tính từ thư mục repo, như README):
+
+```yaml
+stations:
+  metadata: data/toy/weather_stations.csv
+  data_dir: data/toy/weather
+variables: [precip, tmax]
+model:
+  hist: data/toy/model_hist_{var}.nc
+  sim: data/toy/model_sim_{var}.nc
+  var_map: {precip: pr, tmax: tasmax}
+periods:
+  calibration: ["2000", "2012"]
+  validation: ["2013", "2020"]
+targets:
+  - name: precipitation_temperature
+    variables: [precip, tmax]
+    method: principal_components
+    group: season
+output:
+  path: outputs
+  formats: [netcdf, csv]
+```
+
+File dùng ngay từ `configs/` với đường dẫn `../data/toy/`:
+[example_multivariate_stations.yaml](configs/example_multivariate_stations.yaml).
+
+Ví dụ lưới dùng MBCn; phương pháp này bắt buộc `group: none`:
+
+```yaml
+grid:
+  path: data/toy/obs_grid.nc
+  var_map: {precip: pr, tmax: tasmax}
+  units: {precip: "mm d-1", tmax: degC}
+  block_size: 100
+  workers: 1
+variables: [precip, tmax]
+model:
+  hist: data/toy/model_hist_{var}.nc
+  sim: data/toy/model_sim_{var}.nc
+  var_map: {precip: pr, tmax: tasmax}
+periods:
+  calibration: ["2000", "2012"]
+  validation: ["2013", "2020"]
+targets:
+  - name: precipitation_temperature
+    variables: [precip, tmax]
+    method: mbcn
+    group: none
+output:
+  path: outputs
+  formats: [netcdf]
+```
+
+Đổi target sang `npdf_transform` khi cần phương pháp adjust-only; đặt tham số của
+nó trong `adjust_params`, không dùng `train_params`. Rotations của `mbcn` và
+`npdf_transform` được seed để lặp lại kết quả với cùng dữ liệu/cấu hình.
+Trạm dùng giao các station ID và thời gian giữa các biến; lưới dùng giao các ô
+có dữ liệu và giữ cách regrid riêng của mỗi biến. Kết quả được ghi riêng từng biến;
+lỗi một target đánh dấu các biến của target đó là failed, target khác tiếp tục.
+
+Sinh dữ liệu toy trước bằng `scripts/make_toy_data.py`, rồi chạy `bcflow validate`;
+các ví dụ không kèm sẵn dữ liệu. Kiểm tra cấu trúc YAML không thay thế kiểm tra
+đường dẫn, đơn vị và độ phủ dữ liệu của lệnh validate.
+
 ## Cấu trúc
 
 ```
@@ -259,8 +435,12 @@ Windows); cảnh báo của thư viện và traceback đi ra stderr.
 | `bcflow run CONFIG --json`      | mỗi dòng một sự kiện JSON; dòng cuối là `run_finished`       | 0 thành công, 1 có biến lỗi, 2 không chạy được, 130 cancelled |
 | `bcflow validate CONFIG --json` | `{"valid", "variables", "errors": [...], "warnings": [...]}` | 0 hợp lệ (có thể kèm cảnh báo), 1 không hợp lệ                |
 | `bcflow inspect PATH --json`    | biến, chiều, đơn vị, khoảng thời gian của file/thư mục       | 0, hoặc 2 kèm `{"error"}`                                     |
-| `bcflow methods --json`         | `[{"name", "class", "summary"}]`                             | 0                                                             |
+| `bcflow methods --json`         | danh sách 11 phương pháp với metadata (xem bên dưới)          | 0                                                             |
 | `bcflow schema`                 | JSON Schema của file config                                  | 0                                                             |
+
+Mỗi phần tử của `methods --json` giữ `name`, `class`, `summary` và thêm `family`,
+`min_vars`, `supports_projection`, `native_adapt_freq`, `uses_quantiles`, `extra`
+(`null` nếu không cần gói tùy chọn).
 
 Các sự kiện của `run`, theo thứ tự:
 
@@ -279,3 +459,8 @@ Mỗi lần chạy tạo một thư mục `outputs/run_YYYYmmdd_HHMMSS/` gồm `
 (+ `scen.csv`), `adj.nc`, `evaluation.csv`, `hist_eval.nc` (+ `hist_eval.csv`). Cấu trúc `manifest.json` được mô tả
 trong docstring của `writers.py` (`schema_version: 1`). Với tham chiếu là lưới,
 `scen.nc` và `hist_eval.nc` có dạng `(time, lat, lon)`.
+
+Với phương pháp `adjust_only` (ví dụ `npdf_transform`), không có đối tượng đã
+train để lưu: `adj.nc` được bỏ qua và manifest ghi `"adj": null`
+(`schema_version` vẫn là 1). Các chương trình đọc manifest cần chấp nhận giá trị
+này; các kết quả `scen` và đánh giá vẫn được ghi khi có.

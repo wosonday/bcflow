@@ -207,9 +207,7 @@ class CustomVariableConfig(BaseModel):
                 f"kind '*' requires a non-negative lower bound, got {lo!r}."
             )
         if lo is not None and hi is not None and lo > hi:
-            raise ValueError(
-                f"bounds: lower bound {lo} must be <= upper bound {hi}."
-            )
+            raise ValueError(f"bounds: lower bound {lo} must be <= upper bound {hi}.")
         return self
 
 

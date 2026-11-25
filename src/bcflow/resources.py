@@ -207,8 +207,7 @@ def estimate_task_bytes(
     inputs = (ref_steps + hist_steps + sim_steps) * cells * 8
     quantiles = cells * nquantiles * groups * 8 * 3
     return int(
-        (inputs * _INPUT_FACTOR + quantiles) * n_vars * method_factor
-        + _WORKER_BASELINE
+        (inputs * _INPUT_FACTOR + quantiles) * n_vars * method_factor + _WORKER_BASELINE
     )
 
 

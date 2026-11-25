@@ -1,0 +1,31 @@
+# QDM followed by extreme-value correction, using example_toy.yaml's data.
+# Generate first: uv run python scripts/make_toy_data.py
+# Validate: uv run bcflow validate configs/example_post_extreme_values.yaml
+# Relative paths are resolved from configs/.
+stations:
+  metadata: ../data/toy/weather_stations.csv
+  data_dir: ../data/toy/weather
+  file_pattern: "{id}.csv"
+
+variables: [precip]
+model:
+  hist: ../data/toy/model_hist_{var}.nc
+  sim: ../data/toy/model_sim_{var}.nc
+  var_map: {precip: pr}
+
+periods:
+  calibration: ["2000", "2012"]
+  validation: ["2013", "2020"]
+
+correction:
+  precip:
+    method: quantile_delta_mapping
+    group: month
+    post:
+      - method: extreme_values
+        train_params:
+          cluster_thresh: "1 mm d-1"
+
+output:
+  path: ../outputs
+  formats: [netcdf, csv]

@@ -58,7 +58,9 @@ def render_qa_panel(checks: list[dict], *, alt: str) -> None:
             label = _QA_METRIC_LABELS.get(status, status.capitalize())
             st.metric(label, int((table["Status"] == status).sum()))
     statuses = list(dict.fromkeys([*_QA_STATUSES, *table["Status"].tolist()]))
-    selected = st.multiselect("QA status", statuses, default=statuses, key="results_qa_status")
+    selected = st.multiselect(
+        "QA status", statuses, default=statuses, key="results_qa_status"
+    )
     variables = list(dict.fromkeys(table["Variable"].tolist()))
     variable = st.selectbox(
         "QA variable",
@@ -88,8 +90,12 @@ def methods_table_frame(methods: list[dict]) -> pd.DataFrame:
             {
                 "Method": method.get("name", ""),
                 "Family": _FAMILY_LABELS.get(family, str(family)),
-                "Variables": "1 (univariate)" if min_vars == 1 else f"{min_vars}+ (targets:)",
-                "Projection": "Yes" if method.get("supports_projection") else "In-sample only",
+                "Variables": "1 (univariate)"
+                if min_vars == 1
+                else f"{min_vars}+ (targets:)",
+                "Projection": "Yes"
+                if method.get("supports_projection")
+                else "In-sample only",
                 "Extra": f"Requires {extra}" if extra else "Built-in",
                 "Summary": method.get("summary", ""),
             }
@@ -104,7 +110,9 @@ def render_methods_table(
     methods: list[dict], *, alt: str = "Available bias-correction algorithms"
 ) -> None:
     """Render the discovered methods as a tidy badge table with usage guidance."""
-    st.dataframe(methods_table_frame(methods), hide_index=True, width="stretch", alt=alt)
+    st.dataframe(
+        methods_table_frame(methods), hide_index=True, width="stretch", alt=alt
+    )
     st.caption(_METHODS_CAPTION)
 
 
@@ -120,7 +128,10 @@ def render_json_download(
     """Offer a size-capped strict JSON download button."""
     try:
         payload = dump_json_strict(
-            value, indent=indent, ensure_ascii=False, separators=(",", ":") if indent is None else None
+            value,
+            indent=indent,
+            ensure_ascii=False,
+            separators=(",", ":") if indent is None else None,
         ).encode("utf-8")
     except ValueError as exc:
         show_warning(f"Cannot prepare {filename} for download", exc)
@@ -129,6 +140,12 @@ def render_json_download(
         show_warning(f"{filename} download exceeds the 8 MiB limit.")
         return
     st.download_button(
-        label, payload, file_name=filename, mime="application/json",
-        key=key, icon=":material/download:", width=width, on_click="ignore",
+        label,
+        payload,
+        file_name=filename,
+        mime="application/json",
+        key=key,
+        icon=":material/download:",
+        width=width,
+        on_click="ignore",
     )

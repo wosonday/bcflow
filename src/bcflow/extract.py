@@ -38,9 +38,10 @@ def _match_lon(lons: np.ndarray, grid_lon: np.ndarray) -> np.ndarray:
 
 
 def _unit_sphere(lat_deg: np.ndarray, lon_deg: np.ndarray) -> np.ndarray:
+    """Project latitude/longitude arrays onto the unit sphere along the last axis."""
     lat, lon = np.radians(lat_deg), np.radians(lon_deg)
-    return np.column_stack(
-        [np.cos(lat) * np.cos(lon), np.cos(lat) * np.sin(lon), np.sin(lat)]
+    return np.stack(
+        [np.cos(lat) * np.cos(lon), np.cos(lat) * np.sin(lon), np.sin(lat)], axis=-1
     )
 
 
