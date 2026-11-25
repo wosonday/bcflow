@@ -81,8 +81,17 @@ def test_unknown_group_rejected():
         build_grouper(replace(_spec(), group="week"))
 
 
-def test_groups_constant_still_excludes_season():
-    assert GROUPS == ("dayofyear", "month", "none")
+def test_groups_constant_includes_season():
+    assert GROUPS == ("dayofyear", "month", "season", "none")
+    assert "season" in GROUPS
+
+
+def test_season_grouper_with_pool_dims():
+    grouper = build_grouper("season", window=1, pool_dims=("station",))
+    assert grouper.name == "time.season"
+    assert grouper.dim == "time" and grouper.prop == "season"
+    assert grouper.window == 1
+    assert list(grouper.add_dims) == ["station"]
 
 
 # --- effective_samples ------------------------------------------------------

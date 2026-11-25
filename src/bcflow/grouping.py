@@ -4,6 +4,7 @@ Grouping decides which days are corrected together (one transfer function
 per group):
 
     "month"      12 groups, Jan..Dec -- the default;
+    "season"     4 groups, DJF/MAM/JJA/SON;
     "dayofyear"  365/366 groups, each pooled with the days within
                  +-window//2 of it (a moving window, e.g. window=31), which
                  gives a smooth seasonal cycle without monthly steps;
@@ -25,8 +26,7 @@ from .qa import QACheck
 from .variables import GROUPS, VariableSpec
 
 # Average length of a year in daily time steps, and how many groups one year
-# is split into. `"season": 4` is listed (though not yet an allowed GROUPS
-# value) so enabling it in Phase 3 needs no change to the accounting below.
+# is split into.
 _DAYS_PER_YEAR = 365.25
 _GROUPS_PER_YEAR: dict[str, float] = {
     "dayofyear": _DAYS_PER_YEAR,  # one group per calendar day
@@ -73,6 +73,8 @@ def build_grouper(
         return Grouper("time.dayofyear", window=win, add_dims=add_dims)
     if group == "month":
         return Grouper("time.month", window=win, add_dims=add_dims)
+    if group == "season":
+        return Grouper("time.season", window=win, add_dims=add_dims)
     if group == "none":
         return Grouper("time", window=win, add_dims=add_dims)
     label = spec.name if isinstance(spec, VariableSpec) else spec

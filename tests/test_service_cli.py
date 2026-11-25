@@ -58,7 +58,7 @@ def test_validate_reports_schema_errors_with_their_location(
 ):
     bad = copy.deepcopy(toy_config)
     bad["correction"]["tmax"]["window"] = 0
-    bad["correction"]["precip"]["group"] = "season"
+    bad["correction"]["precip"]["group"] = "week"
 
     assert main(["validate", str(_write_config(tmp_path, bad)), "--json"]) == 1
 
