@@ -16,18 +16,126 @@ _EXPECTED_METHODS = [
         "name": "empirical_quantile_mapping",
         "class": "EmpiricalQuantileMapping",
         "summary": "Empirical Quantile Mapping bias-adjustment.",
+        "family": "train_adjust",
+        "min_vars": 1,
+        "supports_projection": True,
+        "native_adapt_freq": True,
+        "uses_quantiles": True,
+        "extra": None,
     },
     {
         "name": "detrended_quantile_mapping",
         "class": "DetrendedQuantileMapping",
         "summary": "Detrended Quantile Mapping bias-adjustment.",
+        "family": "train_adjust",
+        "min_vars": 1,
+        "supports_projection": True,
+        "native_adapt_freq": True,
+        "uses_quantiles": True,
+        "extra": None,
     },
     {
         "name": "quantile_delta_mapping",
         "class": "QuantileDeltaMapping",
         "summary": "Quantile Delta Mapping bias-adjustment.",
+        "family": "train_adjust",
+        "min_vars": 1,
+        "supports_projection": True,
+        "native_adapt_freq": True,
+        "uses_quantiles": True,
+        "extra": None,
     },
-    {"name": "scaling", "class": "Scaling", "summary": "Scaling bias-adjustment."},
+    {
+        "name": "scaling",
+        "class": "Scaling",
+        "summary": "Scaling bias-adjustment.",
+        "family": "train_adjust",
+        "min_vars": 1,
+        "supports_projection": True,
+        "native_adapt_freq": False,
+        "uses_quantiles": False,
+        "extra": None,
+    },
+    {
+        "name": "loci",
+        "class": "LOCI",
+        "summary": "Local Intensity Scaling (LOCI) bias-adjustment.",
+        "family": "train_adjust",
+        "min_vars": 1,
+        "supports_projection": True,
+        "native_adapt_freq": False,
+        "uses_quantiles": False,
+        "extra": None,
+    },
+    {
+        "name": "extreme_values",
+        "class": "ExtremeValues",
+        "summary": "Adjustment correction for extreme values.",
+        "family": "post",
+        "min_vars": 1,
+        "supports_projection": True,
+        "native_adapt_freq": False,
+        "uses_quantiles": True,
+        "extra": None,
+    },
+    {
+        "name": "principal_components",
+        "class": "PrincipalComponents",
+        "summary": "Principal component adjustment.",
+        "family": "train_adjust",
+        "min_vars": 2,
+        "supports_projection": True,
+        "native_adapt_freq": False,
+        "uses_quantiles": False,
+        "extra": None,
+    },
+    {
+        "name": "mbcn",
+        "class": "MBCn",
+        "summary": (
+            "Multivariate bias correction function using the N-dimensional "
+            "probability density function transform."
+        ),
+        "family": "train_adjust",
+        "min_vars": 2,
+        "supports_projection": True,
+        "native_adapt_freq": False,
+        "uses_quantiles": False,
+        "extra": None,
+    },
+    {
+        "name": "npdf_transform",
+        "class": "NpdfTransform",
+        "summary": "N-dimensional probability density function transform.",
+        "family": "adjust_only",
+        "min_vars": 2,
+        "supports_projection": True,
+        "native_adapt_freq": False,
+        "uses_quantiles": False,
+        "extra": None,
+    },
+    {
+        "name": "otc",
+        "class": "OTC",
+        "summary": "Optimal Transport Correction.",
+        "family": "adjust_only",
+        "min_vars": 2,
+        "supports_projection": False,
+        "native_adapt_freq": True,
+        "uses_quantiles": False,
+        "extra": "POT",
+    },
+    {
+        "name": "dotc",
+        "class": "dOTC",
+        "summary": "Dynamical Optimal Transport Correction.",
+        "family": "adjust_only",
+        "min_vars": 2,
+        "supports_projection": True,
+        "native_adapt_freq": True,
+        "uses_quantiles": False,
+        "extra": "POT",
+    },
 ]
 
 # Run in a fresh interpreter: the test runner/conftest already imports NumPy.
@@ -125,8 +233,12 @@ def test_package_and_cli_imports_are_stdlib_only():
 
 
 def test_discovery_metadata_matches_real_registry():
+    from bcflow.discovery import METHOD_METADATA, get_method_meta
     from bcflow.methods import METHOD_REGISTRY
     from bcflow.service import list_methods
+
+    methods = list_methods()
+    assert methods == _EXPECTED_METHODS
 
     actual = [
         {
@@ -136,7 +248,17 @@ def test_discovery_metadata_matches_real_registry():
         }
         for name, cls in METHOD_REGISTRY.items()
     ]
-    assert list_methods() == actual == _EXPECTED_METHODS
+    projected = [
+        {"name": m["name"], "class": m["class"], "summary": m["summary"]}
+        for m in methods
+    ]
+    assert projected == actual
+    assert METHOD_METADATA == tuple(
+        (m["name"], m["class"], m["summary"]) for m in _EXPECTED_METHODS
+    )
+    assert get_method_meta("quantile_delta_mapping").uses_quantiles is True
+    with pytest.raises(ValueError, match="not registered"):
+        get_method_meta("unknown_method")
 
 
 def test_public_exports_are_preserved():
