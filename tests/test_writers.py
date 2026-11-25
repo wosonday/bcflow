@@ -15,7 +15,7 @@ from bcflow.cli import main
 from bcflow.config_schema import OutputConfig, OutputFormat
 from bcflow.pipeline import run_pipeline
 from bcflow.regrid import TargetGrid
-from bcflow.writers import _WRITERS, write_run
+from bcflow.writers import _WRITERS, _write_netcdf, write_run
 
 
 def _read_json(path):
@@ -25,6 +25,30 @@ def _read_json(path):
 def test_output_formats_in_schema_match_registered_writers():
     """Otherwise a format could pass config validation but have no writer."""
     assert set(get_args(OutputFormat)) == set(_WRITERS)
+
+
+def test_netcdf_sanitizes_multivariate_metadata_without_mutating_source(tmp_path):
+    source = xr.Dataset(
+        {"af": ("multivar", [1.5, 2.0], {"options": {"n_iter": 2}, "enabled": True})},
+        coords={"multivar": np.array(["tmax", "precip"], dtype=object)},
+        attrs={"missing": None, "flag": np.bool_(False), "parameters": {"group": "time"}},
+    )
+    source.multivar.attrs = {"_units": ["degC", "mm d-1"], "_standard_name": [None, None]}
+    original = source.copy(deep=True)
+    path = tmp_path / "adj.nc"
+    assert _write_netcdf(source, path) == path
+    xr.testing.assert_identical(source, original)
+    assert source.multivar.dtype == object
+    with xr.open_dataset(path) as written:
+        np.testing.assert_array_equal(written.af, source.af)
+        np.testing.assert_array_equal(written.multivar, source.multivar)
+        assert written.attrs["missing"] == "null"
+        assert written.attrs["flag"] == 0
+        assert json.loads(written.attrs["parameters"]) == {"group": "time"}
+        assert json.loads(written.af.attrs["options"]) == {"n_iter": 2}
+        assert written.af.attrs["enabled"] == 1
+        assert list(written.multivar.attrs["_units"]) == ["degC", "mm d-1"]
+        assert json.loads(written.multivar.attrs["_standard_name"]) == [None, None]
 
 
 def test_write_run_writes_every_variable_qa_and_manifest(toy_config, tmp_path):
@@ -164,6 +188,39 @@ def test_cli_rejects_invalid_output_section_before_running(
     assert main(["run", str(config_file)]) == 2
     assert "formats" in capsys.readouterr().err
     assert not (tmp_path / "outputs").exists()
+
+
+def test_netcdf_sanitizes_ragged_and_unknown_attributes(tmp_path):
+    class Unknown:
+        def __str__(self):
+            return "unknown metadata"
+
+    unknown = Unknown()
+    ragged = [[1, 2], [3], (None, {"flag": np.bool_(True), "value": unknown})]
+    source = xr.Dataset(
+        {"af": ("multivar", [1.5, 2.0], {"ragged": ragged})},
+        coords={"multivar": ["tmax", "precip"]},
+        attrs={
+            "ragged": ragged,
+            "unknown": unknown,
+            "nested": {"values": ragged, "count": np.int64(2)},
+            "numeric": (1, 2.5),
+        },
+    )
+    path = tmp_path / "ragged.nc"
+    _write_netcdf(source, path)
+    expected = [[1, 2], [3], [None, {"flag": 1, "value": "unknown metadata"}]]
+    with xr.open_dataset(path) as written:
+        assert json.loads(written.attrs["ragged"]) == expected
+        assert json.loads(written.af.attrs["ragged"]) == expected
+        assert json.loads(written.attrs["nested"]) == {"values": expected, "count": 2}
+        assert written.attrs["unknown"] == "unknown metadata"
+        np.testing.assert_array_equal(written.attrs["numeric"], [1, 2.5])
+        np.testing.assert_array_equal(written.af, source.af)
+    assert source.attrs["ragged"] is ragged
+    assert source.af.attrs["ragged"] is ragged
+    assert source.attrs["unknown"] is unknown
+    assert ragged[2][1]["value"] is unknown
 
 
 def test_write_run_with_adj_none_for_station_and_grid(tmp_path):

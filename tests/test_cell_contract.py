@@ -71,6 +71,36 @@ def _units(*names: str) -> dict[str, str]:
     return {name: DEFAULTS[name].units for name in names}
 
 
+@pytest.mark.parametrize("method", ["mbcn", "npdf_transform"])
+@pytest.mark.parametrize("seed", [SEED, 1234])
+def test_multivariate_random_rotations_are_reproducible(method, seed):
+    ref = _make_dataset(years=1, seed=151)
+    hist = _make_dataset(years=1, seed=152)
+    sim = _make_dataset(years=1, start="2030-01-01", seed=153)
+    params = (("n_iter", 2), ("n_escore", -1), ("base_kws", {"nquantiles": 10}))
+    plan = CellPlan(
+        target_name="joint", variables=("tmax", "precip"), method=method, group="none",
+        train_params=params if method == "mbcn" else (),
+        adjust_params=params if method == "npdf_transform" else (),
+    )
+    outputs = []
+    for global_seed in (999, 54321):
+        np.random.seed(global_seed)
+        outputs.append(run_cell(
+            plan, ref=ref, hist=hist, sim=sim,
+            specs=_specs("tmax", "precip"), units=_units("tmax", "precip"), seed=seed,
+        ))
+    first, second = outputs
+    xr.testing.assert_equal(first.scen, second.scen)
+    for name in plan.variables:
+        assert bool(np.isfinite(first.scen[name]).all())
+        assert first.scen[name].values.tobytes() == second.scen[name].values.tobytes()
+    if method == "mbcn":
+        xr.testing.assert_equal(first.trained_ds, second.trained_ds)
+    else:
+        assert first.trained_ds is second.trained_ds is None
+
+
 def test_qdm_precip_jitter_adapt_freq_and_seed_parity():
     ref = _make_dataset(years=3, start="2000-01-01", seed=1, dry_frac=0.4, scale=4.0)
     hist = _make_dataset(years=3, start="2000-01-01", seed=2, dry_frac=0.75, scale=2.5)
