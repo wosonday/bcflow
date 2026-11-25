@@ -18,7 +18,7 @@ an error raised, because an empty array fails far less clearly inside xsdba.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Hashable
+from collections.abc import Callable, Hashable, Sequence
 from pathlib import Path
 from typing import NoReturn
 
@@ -459,6 +459,42 @@ def load_grid_points(
         attrs={"units": da.attrs.get("units", "")},
         name=variable,
     )
+
+
+def intersect_station_arrays(
+    arrays: dict[str, xr.DataArray],
+) -> tuple[dict[str, xr.DataArray], list[str]]:
+    """Inner-align multiple variable ``(time, station)`` DataArrays.
+
+    Returns ``(aligned_by_var, dropped_station_ids)`` preserving the station
+    order of the first variable and listing any dropped station IDs in order of
+    first appearance.
+    """
+    if not arrays:
+        raise ValueError("arrays must not be empty.")
+    names = list(arrays)
+    if len(names) == 1:
+        return dict(arrays), []
+    ordered_stations: list[str] = []
+    seen: set[str] = set()
+    for da in arrays.values():
+        for sid in da["station"].values:
+            s = str(sid)
+            if s not in seen:
+                seen.add(s)
+                ordered_stations.append(s)
+    aligned_list = xr.align(*(arrays[n] for n in names), join="inner")
+    aligned = dict(zip(names, aligned_list, strict=True))
+    kept = {str(s) for s in aligned[names[0]]["station"].values}
+    dropped = [s for s in ordered_stations if s not in kept]
+    return aligned, dropped
+
+
+def intersect_grid_masks(masks: Sequence[np.ndarray]) -> np.ndarray:
+    """Return the boolean intersection of one or more grid ``has_data`` masks."""
+    if not masks:
+        raise ValueError("masks must not be empty.")
+    return np.logical_and.reduce(masks)
 
 
 def _fail(qa: list[QACheck], name: str, message: str, variable: str) -> NoReturn:
