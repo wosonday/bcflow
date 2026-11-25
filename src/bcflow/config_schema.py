@@ -23,6 +23,7 @@ xsdba), so this module stays light enough to validate a frontend form.
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import date, datetime
 from typing import Annotated, Any, Literal
 
@@ -36,7 +37,7 @@ from pydantic import (
     model_validator,
 )
 
-from .variables import VariableSpec, resolve
+from .variables import VARIABLES, VariableSpec, resolve
 
 
 def _as_date_text(value: Any) -> Any:
@@ -102,10 +103,10 @@ class GridReferenceConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     path: str  # one NetCDF/Zarr holding every variable
-    var_map: dict[VariableName, str]  # swatprep name -> name in the file
+    var_map: dict[str, str]  # variable name -> name in the file
     # Units of a variable when the file's own 'units' attribute is missing or
     # wrong (e.g. CDO's placeholder "var_unit"): {precip: "mm d-1", tmax: degC}.
-    units: dict[VariableName, str] = Field(default_factory=dict)
+    units: dict[str, str] = Field(default_factory=dict)
     lat_name: str = "auto"
     lon_name: str = "auto"
     time_name: str = "auto"
@@ -124,7 +125,7 @@ class ModelConfig(BaseModel):
 
     hist: str  # historical run; may contain {var}
     sim: str  # run to correct (e.g. a scenario); may contain {var}
-    var_map: dict[VariableName, str]  # swatprep name -> name in the file
+    var_map: dict[str, str]  # variable name -> name in the file
     lat_name: str = "auto"
     lon_name: str = "auto"
     time_name: str = "auto"
@@ -132,11 +133,49 @@ class ModelConfig(BaseModel):
         1, ge=0, le=5
     )  # cells; used when the nearest cell is empty
     # Units of a variable when the model file's 'units' attribute is missing or wrong.
-    units: dict[VariableName, str] = Field(default_factory=dict)
+    units: dict[str, str] = Field(default_factory=dict)
 
     def path(self, which: Literal["hist", "sim"], variable: str) -> str:
         """File of `variable` for the hist or sim run."""
-        return getattr(self, which).replace("{var}", self.var_map[variable])  # type: ignore[index]
+        return getattr(self, which).replace("{var}", self.var_map[variable])
+
+
+class PostConfig(BaseModel):
+    """Post-processing step applied after primary bias adjustment (shape-only)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    method: str
+    train_params: dict[str, Any] = Field(default_factory=dict)
+    adjust_params: dict[str, Any] = Field(default_factory=dict)
+
+
+class CustomVariableConfig(BaseModel):
+    """Schema for a user-defined variable outside the built-in VARIABLES."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    units: str
+    kind: Literal["+", "*"]
+    bounds: tuple[float | None, float | None] = (None, None)
+    adapt_freq: bool = False
+    adapt_freq_thresh: str | None = None
+    jitter_under_thresh: str | None = None
+    regrid: RegridMethod = "bilinear"
+    regrid_params: dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def _validate_bounds(self) -> CustomVariableConfig:
+        lo, hi = self.bounds
+        if self.kind == "*" and (lo is None or lo < 0.0):
+            raise ValueError(
+                f"kind '*' requires a non-negative lower bound, got {lo!r}."
+            )
+        if lo is not None and hi is not None and lo > hi:
+            raise ValueError(
+                f"bounds: lower bound {lo} must be <= upper bound {hi}."
+            )
+        return self
 
 
 class CorrectionConfig(BaseModel):
@@ -145,14 +184,24 @@ class CorrectionConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     method: str | None = None
-    group: Literal["dayofyear", "month", "none"] | None = None
+    group: Literal["dayofyear", "month", "season", "none"] | None = None
     window: int | None = Field(None, ge=1)
+    pool_dims: list[str] = Field(default_factory=list)
     adapt_freq: bool | None = None
     adapt_freq_thresh: str | None = None
     train_params: dict[str, Any] | None = None
     adjust_params: dict[str, Any] | None = None
+    post: list[PostConfig] = Field(default_factory=list)
     regrid: RegridMethod | None = None  # only used with a gridded reference
     regrid_params: dict[str, Any] | None = None  # e.g. idw: {neighbours: 4, power: 2}
+
+    @model_validator(mode="after")
+    def _no_window_with_group_none(self) -> CorrectionConfig:
+        if self.window is not None and self.window > 1 and self.group == "none":
+            raise ValueError(
+                "window > 1 cannot be used with group='none' (single whole-year group)."
+            )
+        return self
 
 
 def _span(period: tuple[str, str], field: str) -> tuple[pd.Timestamp, pd.Timestamp]:
@@ -237,10 +286,11 @@ class PipelineConfig(BaseModel):
 
     stations: StationsConfig | None = None
     grid: GridReferenceConfig | None = None
-    variables: list[VariableName] = Field(min_length=1)
+    variables: list[str] = Field(min_length=1)
+    custom_variables: dict[str, CustomVariableConfig] = Field(default_factory=dict)
     model: ModelConfig
     periods: PeriodsConfig = Field(default_factory=PeriodsConfig)
-    correction: dict[VariableName, CorrectionConfig] = Field(default_factory=dict)
+    correction: dict[str, CorrectionConfig] = Field(default_factory=dict)
     output: OutputConfig = Field(default_factory=OutputConfig)
 
     @model_validator(mode="after")
@@ -250,6 +300,42 @@ class PipelineConfig(BaseModel):
                 "Set exactly one reference: 'stations' (station CSV files) or 'grid' "
                 "(gridded observations)."
             )
+        for name in self.custom_variables:
+            if not name.strip():
+                raise ValueError(
+                    "custom_variables: variable name must not be empty or whitespace."
+                )
+            if name in VARIABLES:
+                raise ValueError(
+                    f"custom_variables: {name!r} collides with built-in variable; "
+                    f"use correction.{name} to override."
+                )
+        allowed = set(VARIABLES) | set(self.custom_variables)
+        unknown_vars = [v for v in self.variables if v not in allowed]
+        if unknown_vars:
+            raise ValueError(
+                f"variables: unknown variable(s) {unknown_vars}; declare them in "
+                f"custom_variables or use {list(VARIABLES)}."
+            )
+        mapping_checks = [
+            ("correction", self.correction),
+            ("model.var_map", self.model.var_map),
+            ("model.units", self.model.units),
+        ]
+        if self.grid is not None:
+            mapping_checks.extend(
+                [
+                    ("grid.var_map", self.grid.var_map),
+                    ("grid.units", self.grid.units),
+                ]
+            )
+        for field_name, mapping in mapping_checks:
+            unknown = sorted(set(mapping) - allowed)
+            if unknown:
+                raise ValueError(
+                    f"{field_name}: unknown variable(s) {unknown}; declare them in "
+                    f"custom_variables or use {list(VARIABLES)}."
+                )
         if self.grid is not None:
             missing = [v for v in self.variables if v not in self.grid.var_map]
             if missing:
@@ -275,14 +361,27 @@ class PipelineConfig(BaseModel):
                 raise ValueError(
                     f"correction.{v}: adapt_freq=true needs 'adapt_freq_thresh' (e.g. '1 mm d-1')."
                 )
+            if spec.group == "none" and spec.window > 1:
+                raise ValueError(
+                    f"correction.{v}: window > 1 cannot be used with group='none'."
+                )
         return self
 
     def spec(self, variable: str) -> VariableSpec:
         """Defaults of `variable` merged with its `correction:` overrides."""
-        override = self.correction.get(variable)  # type: ignore[call-overload]
-        return resolve(
-            variable, override.model_dump(exclude_none=True) if override else None
+        override = self.correction.get(variable)
+        overrides = (
+            override.model_dump(exclude_none=True, exclude={"post", "pool_dims"})
+            if override
+            else {}
         )
+        if variable in self.custom_variables:
+            base = VariableSpec(
+                name=variable,
+                **self.custom_variables[variable].model_dump(),
+            )
+            return replace(base, **overrides) if overrides else base
+        return resolve(variable, overrides or None)
 
 
 def load_config(raw: dict) -> PipelineConfig:

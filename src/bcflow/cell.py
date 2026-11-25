@@ -48,7 +48,7 @@ class CellPlan:
 
 @dataclass
 class CellResult:
-    """Pickle-safe result from executing a CellPlan (strip trained_obj and zeros before IPC)."""
+    """Pickle-safe result from executing a CellPlan (strip trained_obj, zeros, and post_trained before IPC)."""
 
     scen: xr.Dataset
     trained_ds: xr.Dataset | None
@@ -57,6 +57,7 @@ class CellResult:
     clip_counts: dict[str, tuple[int, int]] = field(default_factory=dict)
     trained_obj: Any | None = None
     zeros: ZeroHandling | None = None
+    post_trained: tuple[tuple[MethodSpec, Any, dict[str, Any]], ...] = ()
 
 
 def _validate(
@@ -379,48 +380,70 @@ def _finalize(
     zeros: ZeroHandling | None,
     multivariate: bool,
     qa: list[QACheck],
-) -> tuple[xr.Dataset, dict[str, tuple[int, int]]]:
+    fitted_post: tuple[tuple[MethodSpec, Any, dict[str, Any]], ...] | None = None,
+) -> tuple[
+    xr.Dataset,
+    dict[str, tuple[int, int]],
+    tuple[tuple[MethodSpec, Any, dict[str, Any]], ...],
+]:
     """Step 7: apply post steps -> unstack -> restore zeros -> preserve units -> clip -> transpose."""
-    for step in plan.post:
-        post_spec = get_method(step.method)
-        if post_spec.family != "post":
+    trained_steps: list[tuple[MethodSpec, Any, dict[str, Any]]] = []
+    if fitted_post is not None:
+        for post_spec, post_obj, post_adjust in fitted_post:
+            scen_t = post_obj.adjust(sim_t, scen_t, **post_adjust)
+            trained_steps.append((post_spec, post_obj, post_adjust))
             qa.append(
                 QACheck(
-                    name=f"post:{plan.target_name}:invalid_family",
-                    status="fail",
+                    name=f"post:{plan.target_name}:{post_spec.name}",
+                    status="pass",
                     message=(
-                        f"Post-step method '{step.method}' must have family 'post', "
-                        f"got '{post_spec.family}'."
+                        f"Applied post-processing '{post_spec.name}' for '{plan.target_name}'."
                     ),
-                    context={
-                        "target": plan.target_name,
-                        "method": step.method,
-                        "family": post_spec.family,
-                    },
+                    context={"target": plan.target_name, "method": post_spec.name},
                 )
             )
-            raise ValueError(
-                f"Post-step method '{step.method}' must have family 'post', "
-                f"got '{post_spec.family}'."
-            )
-        check_available(post_spec)
+    else:
+        for step in plan.post:
+            post_spec = get_method(step.method)
+            if post_spec.family != "post":
+                qa.append(
+                    QACheck(
+                        name=f"post:{plan.target_name}:invalid_family",
+                        status="fail",
+                        message=(
+                            f"Post-step method '{step.method}' must have family 'post', "
+                            f"got '{post_spec.family}'."
+                        ),
+                        context={
+                            "target": plan.target_name,
+                            "method": step.method,
+                            "family": post_spec.family,
+                        },
+                    )
+                )
+                raise ValueError(
+                    f"Post-step method '{step.method}' must have family 'post', "
+                    f"got '{post_spec.family}'."
+                )
+            check_available(post_spec)
 
-        post_train = {**dict(post_spec.default_train_params), **dict(step.train_params)}
-        post_adjust = {**dict(post_spec.default_adjust_params), **dict(step.adjust_params)}
-        _inject_registry_defaults(post_spec, plan.variables, specs, post_train, post_adjust)
+            post_train = {**dict(post_spec.default_train_params), **dict(step.train_params)}
+            post_adjust = {**dict(post_spec.default_adjust_params), **dict(step.adjust_params)}
+            _inject_registry_defaults(post_spec, plan.variables, specs, post_train, post_adjust)
 
-        post_trained = post_spec.cls.train(ref_t, hist_t, **post_train)
-        scen_t = post_trained.adjust(sim_t, scen_t, **post_adjust)
-        qa.append(
-            QACheck(
-                name=f"post:{plan.target_name}:{step.method}",
-                status="pass",
-                message=(
-                    f"Applied post-processing '{step.method}' for '{plan.target_name}'."
-                ),
-                context={"target": plan.target_name, "method": step.method},
+            post_obj = post_spec.cls.train(ref_t, hist_t, **post_train)
+            scen_t = post_obj.adjust(sim_t, scen_t, **post_adjust)
+            trained_steps.append((post_spec, post_obj, post_adjust))
+            qa.append(
+                QACheck(
+                    name=f"post:{plan.target_name}:{step.method}",
+                    status="pass",
+                    message=(
+                        f"Applied post-processing '{step.method}' for '{plan.target_name}'."
+                    ),
+                    context={"target": plan.target_name, "method": step.method},
+                )
             )
-        )
 
     if multivariate:
         if "units" not in scen_t.attrs:
@@ -444,7 +467,7 @@ def _finalize(
     for v in list(scen.data_vars):
         scen[v] = scen[v].transpose("time", ...)
 
-    return scen, clip_counts
+    return scen, clip_counts, tuple(trained_steps)
 
 
 def run_cell(
@@ -522,7 +545,7 @@ def run_cell(
     timing["adjust"] = round(monotonic() - t0, 6)
 
     t0 = monotonic()
-    scen, clip_counts = _finalize(
+    scen, clip_counts, post_trained = _finalize(
         scen_t,
         plan=plan,
         ref_t=ref_t,
@@ -545,6 +568,7 @@ def run_cell(
         clip_counts=clip_counts,
         trained_obj=trained,
         zeros=zeros,
+        post_trained=post_trained,
     )
 
 
@@ -558,6 +582,7 @@ def adjust_trained(
     specs: dict[str, VariableSpec],
     units: dict[str, str],
     zeros: ZeroHandling | None = None,
+    post_trained: tuple[tuple[MethodSpec, Any, dict[str, Any]], ...] | None = None,
     qa: list[QACheck] | None = None,
 ) -> xr.Dataset:
     """Apply Steps 6-7 of the cell contract using an already-trained object.
@@ -580,7 +605,7 @@ def adjust_trained(
         plan, method, specs, ref_t, qa, emit_sample_size_qa=False
     )
     scen_t, sim_t = _adjust(method, trained_obj, ref_t, hist_t, sim_t, adjust_kws, zeros)
-    scen, _ = _finalize(
+    scen, _, _ = _finalize(
         scen_t,
         plan=plan,
         ref_t=ref_t,
@@ -591,5 +616,6 @@ def adjust_trained(
         zeros=zeros,
         multivariate=multivariate,
         qa=qa,
+        fitted_post=post_trained,
     )
     return scen

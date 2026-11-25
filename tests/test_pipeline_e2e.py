@@ -194,3 +194,106 @@ def test_scaling_and_loci_run_end_to_end_with_string_stations(toy_config):
     assert np.isfinite(
         out["results"]["precip"]["evaluation"].select_dtypes("number").to_numpy()
     ).all()
+
+
+def test_season_group_runs_end_to_end(toy_config):
+    cfg = copy.deepcopy(toy_config)
+    cfg["correction"] = {
+        "tmax": {
+            "method": "quantile_delta_mapping",
+            "group": "season",
+            "train_params": {"nquantiles": 15},
+        },
+        "precip": {
+            "method": "quantile_delta_mapping",
+            "group": "season",
+            "train_params": {"nquantiles": 15},
+        },
+    }
+
+    out = run_pipeline(cfg)
+
+    assert all(c.status != "fail" for c in out["qa"]), [
+        c.as_dict() for c in out["qa"] if c.status == "fail"
+    ]
+    assert out["results"]["tmax"] is not None
+    assert out["results"]["precip"] is not None
+    done_tmax = next(c for c in out["qa"] if c.name == "train_adjust:tmax:done")
+    done_precip = next(c for c in out["qa"] if c.name == "train_adjust:precip:done")
+    assert done_tmax.context["group"] == "season"
+    assert done_precip.context["group"] == "season"
+
+
+def test_precip_post_extreme_values_runs_end_to_end(toy_config):
+    cfg = copy.deepcopy(toy_config)
+    cfg["variables"] = ["precip"]
+    cfg["correction"] = {
+        "precip": {
+            "method": "quantile_delta_mapping",
+            "group": "month",
+            "train_params": {"nquantiles": 15},
+            "post": [{"method": "extreme_values"}],
+        }
+    }
+
+    out = run_pipeline(cfg)
+
+    assert all(c.status != "fail" for c in out["qa"]), [
+        c.as_dict() for c in out["qa"] if c.status == "fail"
+    ]
+    result = out["results"]["precip"]
+    assert result is not None
+    assert any(
+        c.name == "post:precip:extreme_values" and c.status == "pass"
+        for c in out["qa"]
+    )
+    assert float(result["scen"].min()) >= 0.0
+    assert bool(np.isfinite(result["scen"]).all())
+    assert result["evaluation"] is not None
+    assert np.isfinite(
+        result["evaluation"].select_dtypes("number").to_numpy()
+    ).all()
+
+
+def test_invalid_post_method_fails_only_that_variable(toy_config):
+    bad = copy.deepcopy(toy_config)
+    bad["correction"]["tmax"]["post"] = [{"method": "scaling"}]
+
+    out = run_pipeline(bad)
+
+    assert out["results"]["tmax"] is None and out["results"]["precip"] is not None
+    assert any(
+        c.name == "post:tmax:invalid_family" and c.status == "fail"
+        for c in out["qa"]
+    )
+
+
+def test_custom_variables_runs_end_to_end(grid_config):
+    cfg = copy.deepcopy(grid_config)
+    cfg["variables"] = ["tmean"]
+    cfg["custom_variables"] = {
+        "tmean": {"units": "degC", "kind": "+", "bounds": [-50.0, 60.0]}
+    }
+    cfg["grid"]["region"] = {"lat": [15, 16], "lon": [105, 107]}
+    cfg["grid"]["var_map"] = {"tmean": "tasmax"}
+    cfg["grid"]["units"] = {"tmean": "degC"}
+    cfg["model"]["var_map"] = {"tmean": "tasmax"}
+    cfg["correction"] = {
+        "tmean": {
+            "method": "quantile_delta_mapping",
+            "group": "season",
+            "pool_dims": ["station"],
+            "train_params": {"nquantiles": 15},
+        }
+    }
+
+    out = run_pipeline(cfg)
+
+    assert all(c.status != "fail" for c in out["qa"]), [
+        c.as_dict() for c in out["qa"] if c.status == "fail"
+    ]
+    result = out["results"]["tmean"]
+    assert result is not None
+    assert bool(np.isfinite(result["scen"]).all())
+    done = next(c for c in out["qa"] if c.name == "train_adjust:tmean:done")
+    assert done.context["group"] == "season"

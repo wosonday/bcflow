@@ -35,8 +35,8 @@ from dask.base import compute
 from dask.delayed import delayed
 from xsdba.units import convert_units_to
 
-from .cell import CellPlan, adjust_trained, run_cell
-from .config_schema import PeriodsConfig, PipelineConfig
+from .cell import CellPlan, PostStep, adjust_trained, run_cell
+from .config_schema import CorrectionConfig, PeriodsConfig, PipelineConfig
 from .coverage import check_coverage, coverage_table_from_counts, report_coverage
 from .discovery import get_method_meta
 from .evaluate import evaluate, obs_on_model_dates, paired_series, summarize
@@ -50,7 +50,7 @@ from .loaders import (
     open_grid_reference,
     scan_grid,
 )
-from .methods import METHODS, check_available, get_method
+from .methods import METHODS, MethodSpec, check_available, get_method
 from .preprocess import SEED, ZeroHandling
 from .progress import RunControl
 from .qa import QACheck
@@ -93,8 +93,9 @@ def run_variable(
         control = RunControl()
     control.check_cancelled()
     spec = cfg.spec(variable)
+    override = cfg.correction.get(spec.name)
     # Before loading: a typo in the method name should not cost a full data load.
-    _check_method(spec, qa)
+    _check_method(spec, qa, override=override)
     plan = _build_plan(cfg, spec)
     if cfg.grid is not None:
         return _run_grid(cfg, spec, qa, control=control, plan=plan)
@@ -148,7 +149,7 @@ def _run_grid(
     qa: list[QACheck],
     *,
     control: RunControl,
-    plan: CellPlan | None = None,
+    plan: CellPlan,
 ) -> dict:
     """Regrid in the parent, then correct CPU/RAM-budgeted batches of spatial blocks.
 
@@ -224,7 +225,6 @@ def _run_grid(
     sim_all = model_box(
         load_model_variable(model, "sim", variable, qa), target, **options
     )
-    plan = plan or _build_plan(cfg, spec)
     parts = []
     block_size = grid_cfg.block_size
     total_blocks = (target.size + block_size - 1) // block_size
@@ -232,7 +232,7 @@ def _run_grid(
     quantile_count = (
         int(quantiles) if isinstance(quantiles, (int, np.integer)) else len(quantiles)
     )
-    groups = {"month": 12, "dayofyear": 366, "none": 1}[spec.group]
+    groups = {"month": 12, "dayofyear": 366, "season": 4, "none": 1}[spec.group]
     completed_cells = 0
     warned_memory = False
     start = 0
@@ -400,7 +400,7 @@ def _correct_block_task(
     hist: xr.DataArray,
     sim: xr.DataArray,
     block_qa: list[QACheck],
-    plan: CellPlan | None = None,
+    plan: CellPlan,
 ) -> tuple[dict, list[QACheck]]:
     """Return both results and QA; mutations in worker processes are not shared."""
     part = _correct(cfg, spec, ref, hist, sim, block_qa, compact=True, plan=plan)
@@ -442,10 +442,10 @@ def _correct(
     sim: xr.DataArray,
     qa: list[QACheck],
     *,
+    plan: CellPlan,
     compact: bool = False,
     control: RunControl | None = None,
     block_context: dict[str, int] | None = None,
-    plan: CellPlan | None = None,
 ) -> dict:
     """Units, time axis, training, adjustment and evaluation of one set of
     points (all stations, or one block of grid cells).
@@ -459,7 +459,6 @@ def _correct(
         control = RunControl()
     context = block_context or {}
     variable = spec.name
-    plan = plan or _build_plan(cfg, spec)
     control.progress(variable, "preparing", **context)
     ref, hist, sim, units = harmonize(ref, hist, sim, spec.units, qa, name=variable)
     ref, hist, sim = align_daily(ref, hist, sim, qa, name=variable)
@@ -496,6 +495,7 @@ def _correct(
         hist_cal,
         units,
         qa,
+        post_trained=res.post_trained,
     )
     if compact:
         scen = scen.astype("float32")
@@ -647,7 +647,11 @@ def _finish(
     }
 
 
-def _check_method(spec: VariableSpec, qa: list[QACheck]) -> None:
+def _check_method(
+    spec: VariableSpec,
+    qa: list[QACheck],
+    override: CorrectionConfig | None = None,
+) -> None:
     if spec.method not in METHODS:
         qa.append(
             QACheck(
@@ -717,9 +721,64 @@ def _check_method(spec: VariableSpec, qa: list[QACheck]) -> None:
         )
         raise
 
+    if override is not None:
+        for step in override.post:
+            if step.method not in METHODS:
+                qa.append(
+                    QACheck(
+                        name=f"post:{spec.name}:unknown",
+                        status="fail",
+                        message=(
+                            f"Post-step method '{step.method}' is not registered. "
+                            f"Valid methods: {sorted(METHODS)}."
+                        ),
+                        context={"variable": spec.name, "method": step.method},
+                    )
+                )
+                raise ValueError(
+                    f"Invalid post-step method for variable '{spec.name}': {step.method!r}"
+                )
+            post_spec = get_method(step.method)
+            if post_spec.family != "post":
+                qa.append(
+                    QACheck(
+                        name=f"post:{spec.name}:invalid_family",
+                        status="fail",
+                        message=(
+                            f"Post-step method '{step.method}' must have family 'post', "
+                            f"got '{post_spec.family}'."
+                        ),
+                        context={
+                            "variable": spec.name,
+                            "method": step.method,
+                            "family": post_spec.family,
+                        },
+                    )
+                )
+                raise ValueError(
+                    f"Post-step method '{step.method}' must have family 'post', "
+                    f"got '{post_spec.family}'."
+                )
+            try:
+                check_available(post_spec)
+            except ValueError as exc:
+                qa.append(
+                    QACheck(
+                        name=f"post:{spec.name}:unavailable",
+                        status="fail",
+                        message=str(exc),
+                        context={
+                            "variable": spec.name,
+                            "method": step.method,
+                            "extra": post_spec.extra,
+                        },
+                    )
+                )
+                raise
+
 
 def _build_plan(cfg: PipelineConfig, spec: VariableSpec) -> CellPlan:
-    override = cfg.correction.get(spec.name)  # type: ignore[call-overload]
+    override = cfg.correction.get(spec.name)
     train_params, adjust_params = resolve_method_params(
         spec,
         get_method_meta(spec.method),
@@ -732,8 +791,21 @@ def _build_plan(cfg: PipelineConfig, spec: VariableSpec) -> CellPlan:
         method=spec.method,
         group=spec.group,
         window=spec.window,
+        pool_dims=tuple(override.pool_dims) if override else (),
         train_params=tuple(train_params.items()),
         adjust_params=tuple(adjust_params.items()),
+        post=(
+            tuple(
+                PostStep(
+                    method=p.method,
+                    train_params=tuple(p.train_params.items()),
+                    adjust_params=tuple(p.adjust_params.items()),
+                )
+                for p in override.post
+            )
+            if override
+            else ()
+        ),
     )
 
 
@@ -824,6 +896,8 @@ def _evaluate_block(
     hist_cal: xr.DataArray,
     units: str,
     qa: list[QACheck],
+    *,
+    post_trained: tuple[tuple[MethodSpec, Any, dict[str, Any]], ...] | None = None,
 ) -> tuple[dict[str, pd.DataFrame], list[xr.Dataset]]:
     """Apply the trained correction to hist over the calibration AND the
     validation period, and score each period separately.
@@ -880,6 +954,7 @@ def _evaluate_block(
                     specs=specs_map,
                     units=units_map,
                     zeros=zeros,
+                    post_trained=post_trained,
                 )
             elif method.supports_projection:
                 corrected_ds = run_cell(

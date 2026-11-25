@@ -85,7 +85,7 @@ def test_adapt_freq_without_threshold_rejected(toy_config):
 
 @pytest.mark.parametrize(
     "override",
-    [{"group": "season"}, {"window": 0}, {"kind": "+"}],  # kind is fixed per variable
+    [{"group": "week"}, {"window": 0}, {"kind": "+"}],  # kind is fixed per variable
 )
 def test_invalid_correction_rejected(toy_config, override):
     bad = copy.deepcopy(toy_config)
@@ -159,3 +159,133 @@ def test_resolve_method_params_explicit_adjust_on_scaling_passes_through():
         explicit_adjust={"interp": "nearest"},
     )
     assert explicit_adjust == {"interp": "nearest"}
+
+
+def test_season_group_accepted(toy_config):
+    raw = copy.deepcopy(toy_config)
+    raw["correction"]["tmax"] = {"group": "season"}
+    cfg = load_config(raw)
+    assert cfg.spec("tmax").group == "season"
+
+
+def test_window_with_group_none_rejected(toy_config):
+    bad = copy.deepcopy(toy_config)
+    bad["correction"]["precip"]["group"] = "none"
+    bad["correction"]["precip"]["window"] = 5
+    with pytest.raises(ValidationError, match="window > 1"):
+        load_config(bad)
+
+
+def test_post_config_shape_and_extra_forbid(toy_config):
+    raw = copy.deepcopy(toy_config)
+    raw["correction"]["precip"]["post"] = [
+        {
+            "method": "extreme_values",
+            "train_params": {"cluster_thresh": "10 mm d-1"},
+            "adjust_params": {"interp": "linear"},
+        }
+    ]
+    cfg = load_config(raw)
+    assert len(cfg.correction["precip"].post) == 1
+    assert cfg.correction["precip"].post[0].method == "extreme_values"
+    assert cfg.correction["precip"].post[0].train_params == {"cluster_thresh": "10 mm d-1"}
+    assert cfg.spec("precip").method == "empirical_quantile_mapping"
+
+    bad = copy.deepcopy(raw)
+    bad["correction"]["precip"]["post"][0]["unknown_field"] = 123
+    with pytest.raises(ValidationError):
+        load_config(bad)
+
+
+def test_pool_dims_accepted_and_excluded_from_spec(toy_config):
+    raw = copy.deepcopy(toy_config)
+    raw["correction"]["tmax"]["pool_dims"] = ["station"]
+    cfg = load_config(raw)
+    assert cfg.correction["tmax"].pool_dims == ["station"]
+    assert cfg.spec("tmax").window == 15
+
+
+def test_custom_variables_valid_and_spec_with_overrides(toy_config):
+    raw = copy.deepcopy(toy_config)
+    raw["variables"] = ["tmax", "precip", "evap"]
+    raw["model"]["var_map"]["evap"] = "evspsbl"
+    raw["custom_variables"] = {
+        "evap": {
+            "units": "mm d-1",
+            "kind": "*",
+            "bounds": [0.0, None],
+            "regrid": "conservative",
+        }
+    }
+    raw["correction"]["evap"] = {
+        "group": "season",
+        "pool_dims": ["station"],
+        "post": [{"method": "extreme_values"}],
+    }
+    cfg = load_config(raw)
+    spec = cfg.spec("evap")
+    assert spec.name == "evap"
+    assert spec.units == "mm d-1"
+    assert spec.kind == "*"
+    assert spec.bounds == (0.0, None)
+    assert spec.regrid == "conservative"
+    assert spec.group == "season"
+
+
+def test_custom_variables_collision_and_empty_rejected(toy_config):
+    bad_collision = copy.deepcopy(toy_config)
+    bad_collision["custom_variables"] = {
+        "precip": {"units": "mm d-1", "kind": "*", "bounds": [0.0, None]}
+    }
+    with pytest.raises(ValidationError, match="collides"):
+        load_config(bad_collision)
+
+    bad_empty = copy.deepcopy(toy_config)
+    bad_empty["custom_variables"] = {"   ": {"units": "degC", "kind": "+"}}
+    with pytest.raises(ValidationError, match="empty or whitespace"):
+        load_config(bad_empty)
+
+
+def test_unknown_variable_in_mappings_rejected(toy_config, grid_config):
+    for base, section, key in [
+        (toy_config, "model", "var_map"),
+        (toy_config, "model", "units"),
+        (grid_config, "grid", "var_map"),
+        (grid_config, "grid", "units"),
+    ]:
+        bad = copy.deepcopy(base)
+        bad[section].setdefault(key, {})["ghost"] = "gh"
+        with pytest.raises(ValidationError, match="ghost"):
+            load_config(bad)
+
+    bad_corr = copy.deepcopy(toy_config)
+    bad_corr["correction"]["ghost"] = {}
+    with pytest.raises(ValidationError, match="ghost"):
+        load_config(bad_corr)
+
+
+def test_custom_variables_bounds_validation(toy_config):
+    for bounds in ([None, None], [-0.1, None], [10.0, 5.0]):
+        bad = copy.deepcopy(toy_config)
+        bad["custom_variables"] = {
+            "evap": {"units": "mm d-1", "kind": "*", "bounds": bounds}
+        }
+        with pytest.raises(ValidationError):
+            load_config(bad)
+
+
+def test_config_schema_does_not_import_xsdba():
+    import os
+    import subprocess
+    import sys
+
+    env = os.environ.copy()
+    subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import sys, bcflow.config_schema; assert 'xsdba' not in sys.modules",
+        ],
+        check=True,
+        env=env,
+    )

@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any
+from typing import Any, Collection
 
 import pandas as pd
 import xarray as xr
@@ -24,14 +24,14 @@ from ._version import bcflow_version
 from .config_loader import load_config_file
 from .config_schema import PipelineConfig, StationsConfig, load_config
 from .coverage import check_coverage
-from .discovery import list_methods
+from .discovery import METHOD_META_BY_NAME, list_methods
 from .loaders import (
     load_station_metadata,
     load_station_variable,
     open_grid_reference,
     station_file,
 )
-from .methods import METHOD_REGISTRY
+from .methods import check_available, get_method
 from .pipeline import run_pipeline
 from .progress import EventHandler, RunControl
 from .qa import QACheck
@@ -59,16 +59,26 @@ def config_json_schema() -> dict:
 # --- validate ---------------------------------------------------------------
 
 
-def _variable_of(loc: list) -> str | None:
+def _variable_of(
+    loc: list, known_variables: Collection[str] = VARIABLES
+) -> str | None:
     """The variable an error belongs to, when its location names one."""
-    return next((str(x) for x in loc if x in VARIABLES), None)
+    return next((str(x) for x in loc if x in known_variables), None)
 
 
-def _pydantic_errors(exc: ValidationError) -> list[dict]:
+def _pydantic_errors(
+    exc: ValidationError, known_variables: Collection[str] = VARIABLES
+) -> list[dict]:
     out = []
     for e in exc.errors():
         loc = list(e["loc"])
-        out.append({"variable": _variable_of(loc), "loc": loc, "message": e["msg"]})
+        out.append(
+            {
+                "variable": _variable_of(loc, known_variables),
+                "loc": loc,
+                "message": e["msg"],
+            }
+        )
     return out
 
 
@@ -143,14 +153,91 @@ def _semantic_errors(cfg: PipelineConfig) -> list[dict]:
     errors: list[dict] = []
     for v in cfg.variables:
         method = cfg.spec(v).method
-        if method not in METHOD_REGISTRY:
+        override = cfg.correction.get(v)
+        if method not in METHOD_META_BY_NAME:
             errors.append(
                 {
                     "variable": v,
                     "loc": ["correction", v, "method"],
-                    "message": f"Method '{method}' is not registered. Valid methods: {sorted(METHOD_REGISTRY)}.",
+                    "message": f"Method '{method}' is not registered. Valid methods: {sorted(METHOD_META_BY_NAME)}.",
                 }
             )
+        else:
+            meta = METHOD_META_BY_NAME[method]
+            if meta.family == "post":
+                errors.append(
+                    {
+                        "variable": v,
+                        "loc": ["correction", v, "method"],
+                        "message": (
+                            f"Method '{method}' has family 'post' and is only valid "
+                            "as a 'post:' step."
+                        ),
+                    }
+                )
+            if meta.min_vars > 1:
+                errors.append(
+                    {
+                        "variable": v,
+                        "loc": ["correction", v, "method"],
+                        "message": (
+                            f"Method '{method}' requires at least {meta.min_vars} "
+                            "variables and needs 'targets:' (Phase 4)."
+                        ),
+                    }
+                )
+            if (
+                meta.family == "adjust_only"
+                and override is not None
+                and override.train_params
+            ):
+                errors.append(
+                    {
+                        "variable": v,
+                        "loc": ["correction", v, "train_params"],
+                        "message": (
+                            f"Method '{method}' has family 'adjust_only' and does not "
+                            "accept 'train_params'; remove it."
+                        ),
+                    }
+                )
+            try:
+                check_available(get_method(method))
+            except ValueError as exc:
+                errors.append(
+                    {
+                        "variable": v,
+                        "loc": ["correction", v, "method"],
+                        "message": str(exc),
+                    }
+                )
+
+        for idx, step in enumerate(override.post if override else ()):
+            loc = ["correction", v, "post", idx, "method"]
+            if step.method not in METHOD_META_BY_NAME:
+                errors.append(
+                    {
+                        "variable": v,
+                        "loc": loc,
+                        "message": f"Method '{step.method}' is not registered. Valid methods: {sorted(METHOD_META_BY_NAME)}.",
+                    }
+                )
+            elif METHOD_META_BY_NAME[step.method].family != "post":
+                errors.append(
+                    {
+                        "variable": v,
+                        "loc": loc,
+                        "message": (
+                            f"Post-step method '{step.method}' must have family "
+                            f"'post', got '{METHOD_META_BY_NAME[step.method].family}'."
+                        ),
+                    }
+                )
+            else:
+                try:
+                    check_available(get_method(step.method))
+                except ValueError as exc:
+                    errors.append({"variable": v, "loc": loc, "message": str(exc)})
 
     if cfg.stations is not None:
         errors += _station_errors(cfg.stations)
@@ -244,13 +331,17 @@ def validate_config_file(path: str | Path) -> dict:
 
     listed = raw.get("variables")
     names = [str(v) for v in listed] if isinstance(listed, list) else []
+    custom = raw.get("custom_variables")
+    known_variables = set(VARIABLES) | (
+        {str(name) for name in custom} if isinstance(custom, dict) else set()
+    )
     try:
         cfg = load_config(raw)
     except ValidationError as exc:
         return {
             "valid": False,
             "variables": names,
-            "errors": _pydantic_errors(exc),
+            "errors": _pydantic_errors(exc, known_variables),
             "warnings": [],
         }
 

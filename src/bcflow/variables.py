@@ -31,7 +31,7 @@ from .discovery import MethodMeta
 
 VARIABLES = ("precip", "tmax", "tmin", "wind", "solar", "humidity")
 
-GROUPS = ("dayofyear", "month", "none")
+GROUPS = ("dayofyear", "month", "season", "none")
 
 
 @dataclass(frozen=True)
@@ -42,7 +42,7 @@ class VariableSpec:
     units: str  # units of the station data (swatprep convention)
     kind: str  # "+" additive (temperature), "*" multiplicative (precip, wind, ...)
     method: str = "quantile_delta_mapping"
-    group: str = "month"  # "dayofyear" | "month" | "none"
+    group: str = "month"  # "dayofyear" | "month" | "season" | "none"
     window: int = 1  # days around each day of year; only used with group="dayofyear"
     adapt_freq: bool = False
     adapt_freq_thresh: str | None = None
