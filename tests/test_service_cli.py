@@ -7,6 +7,7 @@ exit code says success (0) / finished with failures (1) / could not start (2).
 from __future__ import annotations
 
 import copy
+import importlib.util
 import json
 from pathlib import Path
 
@@ -89,6 +90,123 @@ def test_validate_reports_every_missing_input_and_bad_method(
         ("model", "sim"),
     ) in located
     assert (None, ("stations", "file_pattern")) in located
+
+
+def _errors_by_loc(result: dict) -> dict[tuple, str]:
+    return {(e["variable"], tuple(e["loc"])): e["message"] for e in result["errors"]}
+
+
+def test_validate_reports_post_only_and_multivariate_primary_methods(
+    toy_config, tmp_path, capsys
+):
+    bad = copy.deepcopy(toy_config)
+    bad["correction"]["tmax"]["method"] = "extreme_values"  # family == "post"
+    bad["correction"]["precip"]["method"] = "mbcn"  # min_vars == 2
+
+    assert main(["validate", str(_write_config(tmp_path, bad)), "--json"]) == 1
+
+    messages = _errors_by_loc(json.loads(capsys.readouterr().out))
+    post = messages[("tmax", ("correction", "tmax", "method"))]
+    assert "post" in post and "'post:'" in post
+    multi = messages[("precip", ("correction", "precip", "method"))]
+    assert "at least 2 variables" in multi and "'targets:'" in multi
+
+
+def test_validate_reports_train_params_on_adjust_only_method(
+    toy_config, tmp_path, capsys
+):
+    bad = copy.deepcopy(toy_config)
+    bad["correction"]["tmax"]["method"] = "npdf_transform"  # family == "adjust_only"
+    bad["correction"]["tmax"]["train_params"] = {"nquantiles": 15}
+
+    assert main(["validate", str(_write_config(tmp_path, bad)), "--json"]) == 1
+
+    messages = _errors_by_loc(json.loads(capsys.readouterr().out))
+    message = messages[("tmax", ("correction", "tmax", "train_params"))]
+    assert "adjust_only" in message and "train_params" in message
+    # The method-level min_vars error is collected too, not just the first one.
+    assert ("tmax", ("correction", "tmax", "method")) in messages
+
+
+@pytest.mark.skipif(
+    importlib.util.find_spec("ot") is not None, reason="the optional POT package is installed"
+)
+def test_validate_reports_missing_pot_with_the_other_input_errors(
+    toy_config, tmp_path, capsys
+):
+    bad = copy.deepcopy(toy_config)
+    bad["correction"]["tmax"]["method"] = "otc"  # needs POT
+    bad["model"]["sim"] = str(tmp_path / "missing_{var}.nc")
+
+    assert main(["validate", str(_write_config(tmp_path, bad)), "--json"]) == 1
+
+    messages = _errors_by_loc(json.loads(capsys.readouterr().out))
+    pot = messages[("tmax", ("correction", "tmax", "method"))]
+    assert "POT" in pot and "pip install POT" in pot
+    assert ("tmax", ("model", "sim")) in messages
+    assert ("precip", ("model", "sim")) in messages
+
+
+def test_validate_reports_invalid_post_steps(toy_config, tmp_path, capsys):
+    bad = copy.deepcopy(toy_config)
+    bad["correction"]["precip"]["post"] = [
+        {"method": "scaling"},  # family == "train_adjust"
+        {"method": "does_not_exist"},
+    ]
+
+    assert main(["validate", str(_write_config(tmp_path, bad)), "--json"]) == 1
+
+    messages = _errors_by_loc(json.loads(capsys.readouterr().out))
+    family = messages[("precip", ("correction", "precip", "post", 0, "method"))]
+    assert "family 'post'" in family and "train_adjust" in family
+    unknown = messages[("precip", ("correction", "precip", "post", 1, "method"))]
+    assert "not registered" in unknown
+
+
+def test_validate_accepts_season_post_and_custom_variables(
+    toy_config, toy_paths, tmp_path, capsys
+):
+    import pandas as pd
+
+    for path in sorted(toy_paths["weather_dir"].glob("*.csv")):
+        df = pd.read_csv(path)
+        df["cloud"] = 0.5
+        df.to_csv(path, index=False)
+    for key in ("hist_template", "sim_template"):
+        Path(str(toy_paths[key]).replace("{var}", "clt")).touch()
+
+    cfg = copy.deepcopy(toy_config)
+    cfg["variables"].append("cloud")
+    cfg["model"]["var_map"]["cloud"] = "clt"
+    cfg["custom_variables"] = {
+        "cloud": {"units": "fraction", "kind": "*", "bounds": [0.0, 1.0]}
+    }
+    cfg["correction"]["tmax"]["group"] = "season"
+    cfg["correction"]["tmax"].pop("window", None)
+    cfg["correction"]["precip"]["post"] = [{"method": "extreme_values"}]
+
+    assert main(["validate", str(_write_config(tmp_path, cfg)), "--json"]) == 0
+    result = json.loads(capsys.readouterr().out)
+    assert result["valid"] is True and result["errors"] == []
+    assert set(result["variables"]) == {"tmax", "precip", "cloud"}
+
+
+def test_validate_names_a_custom_variable_in_schema_errors(toy_config, tmp_path, capsys):
+    bad = copy.deepcopy(toy_config)
+    bad["custom_variables"] = {
+        "cloud": {"units": "fraction", "kind": "*"}  # '*' needs a lower bound
+    }
+
+    assert main(["validate", str(_write_config(tmp_path, bad)), "--json"]) == 1
+
+    error = next(
+        e
+        for e in json.loads(capsys.readouterr().out)["errors"]
+        if e["loc"][:1] == ["custom_variables"]
+    )
+    assert error["variable"] == "cloud"
+    assert error["loc"][:2] == ["custom_variables", "cloud"]
+
 
 
 def test_run_json_streams_events_then_a_summary(toy_config, tmp_path, capsys):
