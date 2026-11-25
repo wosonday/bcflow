@@ -463,3 +463,63 @@ def test_grid_locations_are_supported_and_nonfinite_values_are_sanitized():
     assert pd.isna(chart["Raw"].iloc[0])
     assert data["raw"].iloc[0] == float("inf")
     assert results._metric_label("wet_day_freq_diff", {}, data).endswith("(fraction)")
+
+
+def test_qa_and_evaluation_cache_invalidate_on_size_and_refresh(
+    runtime, tmp_path, monkeypatch
+):
+    manifest = _write_run(
+        tmp_path / "outputs/run_size_refresh",
+        checks=[{"name": "c", "status": "pass", "message": "ok", "context": {}}],
+    )
+    qa_path = manifest.parent / "qa.json"
+    csv_path = manifest.parent / "tmax/evaluation.csv"
+    qa_calls = []
+    eval_calls = []
+    orig_qa = results.service.read_qa
+    orig_eval = results.service.read_evaluation
+
+    def tracked_qa(*args, **kwargs):
+        qa_calls.append(args[0])
+        return orig_qa(*args, **kwargs)
+
+    def tracked_eval(*args, **kwargs):
+        eval_calls.append(kwargs.get("max_rows"))
+        return orig_eval(*args, **kwargs)
+
+    monkeypatch.setattr(results.service, "read_qa", tracked_qa)
+    monkeypatch.setattr(results.service, "read_evaluation", tracked_eval)
+    results._read_qa.clear()
+    results._read_evaluation.clear()
+
+    app = _app()
+    assert len(qa_calls) == 1
+    assert len(eval_calls) == 1
+
+    # Same mtime_ns, different st_size must invalidate both caches.
+    qa_info = qa_path.stat()
+    qa_path.write_text(
+        json.dumps(
+            [{"name": "c", "status": "pass", "message": "updated", "context": {}}]
+        ),
+        encoding="utf-8",
+    )
+    os.utime(qa_path, ns=(qa_info.st_atime_ns, qa_info.st_mtime_ns))
+
+    csv_info = csv_path.stat()
+    csv_path.write_text(
+        csv_path.read_text(encoding="utf-8") + "validation,003,mean_bias,1.0,0.2\n",
+        encoding="utf-8",
+    )
+    os.utime(csv_path, ns=(csv_info.st_atime_ns, csv_info.st_mtime_ns))
+
+    app.run()
+    assert not app.exception
+    assert len(qa_calls) == 2
+    assert len(eval_calls) == 2
+
+    # Refresh clears _list_manifests, _read_qa, and _read_evaluation.
+    app.button(key="results_refresh").click().run()
+    assert not app.exception
+    assert len(qa_calls) == 3
+    assert len(eval_calls) == 3

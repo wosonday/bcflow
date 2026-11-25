@@ -198,3 +198,35 @@ assert 'bcflow.service' not in sys.modules
         check=False,
     )
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_list_example_configs_and_normalize_dates(tmp_path):
+    from datetime import date, datetime
+
+    (tmp_path / "b.yml").write_text("k: 1\n", encoding="utf-8")
+    (tmp_path / "a.yaml").write_text("k: 1\n", encoding="utf-8")
+    (tmp_path / "c.json").write_text("{}\n", encoding="utf-8")
+    (tmp_path / "notes.txt").write_text("ignored\n", encoding="utf-8")
+    assert service.list_example_configs(tmp_path) == [
+        str(tmp_path / "a.yaml"),
+        str(tmp_path / "b.yml"),
+        str(tmp_path / "c.json"),
+    ]
+    assert service.list_example_configs(tmp_path / "missing") == []
+
+    normalized, digest = service.normalize_config_for_json(
+        {"d": date(2025, 1, 2), "dt": datetime(2025, 1, 2, 3, 4)}
+    )
+    assert normalized == {"d": "2025-01-02", "dt": "2025-01-02T03:04:00"}
+    assert digest == service.config_digest(normalized)
+
+
+def test_save_copy_protects_source_and_creates_parents(tmp_path):
+    source = tmp_path / "source.yaml"
+    source.write_text("a: 1\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="source config is protected"):
+        service.save_copy({"a": 1}, source, overwrite=True, source_path=source)
+    nested = tmp_path / "sub" / "dir" / "copy.json"
+    saved = service.save_copy({"a": 1}, nested, create_parents=True)
+    assert saved == nested.absolute()
+    assert json.loads(nested.read_text(encoding="utf-8")) == {"a": 1}

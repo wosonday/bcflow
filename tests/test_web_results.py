@@ -335,3 +335,59 @@ assert 'bcflow.writers' not in sys.modules
         check=False,
     )
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_results_data_helpers(tmp_path):
+    history = [
+        {"kind": "validate", "active": False, "summary": {"manifest": "skip.json"}},
+        {"kind": "run", "active": True, "summary": {"manifest": "active.json"}},
+        {"kind": "run", "active": False, "summary": {"manifest": "out/manifest.json"}},
+    ]
+    assert results.latest_manifest(history, tmp_path) == str(
+        (tmp_path / "out/manifest.json").absolute()
+    )
+    assert results.latest_manifest([], tmp_path) is None
+
+    frame = results.qa_checks_frame(
+        [
+            {"name": "c1", "status": "pass", "message": "ok", "context": {"variable": "tas"}},
+            {"name": "c2", "status": "warn", "message": "w"},
+        ]
+    )
+    assert list(frame.columns) == ["Status", "Variable", "Check", "Message", "Context"]
+    assert frame["Variable"].tolist() == ["tas", "Run"]
+
+    manifest = {
+        "qa": "qa.json",
+        "config": None,
+        "variables": {
+            "tas": {
+                "evaluation": "tas/eval.csv",
+                "scen": {"netcdf": "tas/scen.nc", "zarr": None},
+            }
+        },
+    }
+    assert results.declared_artifacts(manifest) == [
+        ("qa", "qa.json"),
+        ("tas / evaluation", "tas/eval.csv"),
+        ("tas / scen / netcdf", "tas/scen.nc"),
+    ]
+
+    df = pd.DataFrame(
+        {
+            "station": ["001", "001", "002"],
+            "raw": [float("inf"), 1.0, 2.0],
+            "corrected": [0.5, 0.6, 0.7],
+            "units": ["degC", "degC", "degC"],
+        }
+    )
+    cleaned = results.finite_values(df)
+    assert pd.isna(cleaned["raw"].iloc[0])
+    assert pd.api.types.is_float_dtype(cleaned["raw"])
+    chart = results.chart_data(cleaned)
+    assert chart["Location"].tolist() == ["001", "002"]
+    assert results.metric_label("mean_bias", {}, cleaned) == "mean bias (degC)"
+    assert (
+        results.metric_label("sd_ratio", {"units": "degC"}, cleaned)
+        == "sd ratio (dimensionless ratio)"
+    )
