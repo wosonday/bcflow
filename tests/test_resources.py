@@ -23,7 +23,8 @@ def host(monkeypatch):
 
     def read_text(path, **kwargs):
         try:
-            return state.files[str(path)]
+            # cgroup paths are POSIX; on Windows str(Path(...)) uses backslashes.
+            return state.files[Path(path).as_posix()]
         except KeyError:
             raise FileNotFoundError(str(path)) from None
 
