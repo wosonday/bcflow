@@ -270,10 +270,32 @@ def _run_grid(
     has_data_by_var: dict[str, np.ndarray] = {}
     valid_by_var: dict[str, np.ndarray] = {}
     window_days_by_var: dict[str, int] = {}
+    v0 = variables[0]
 
     for v in variables:
         control.progress(v, "loading_reference")
         ref_v, lat_v, lon_v = open_grid_reference(grid_cfg, v, qa)
+        if len(variables) > 1:
+            # Shared cell indices are safe only after sorting the actual geographic
+            # coordinates (which may differ from the dimension indexes).
+            ref_v = ref_v.sortby([lat_v, lon_v])
+            if v != v0:
+                for axis, coord_v, coord_0 in (
+                    ("latitude", lat_v, lats[v0]), ("longitude", lon_v, lons[v0])
+                ):
+                    values = np.asarray(ref_v[coord_v].values, dtype=float)
+                    expected = np.asarray(references[v0][coord_0].values, dtype=float)
+                    if values.shape != expected.shape or not np.allclose(
+                        values, expected, rtol=0, atol=1e-6
+                    ):
+                        _fail_qa(
+                            qa,
+                            f"grid:{label}:axes_mismatch",
+                            f"Reference grid {axis} axes differ between '{v0}' and '{v}' "
+                            f"for target '{label}' -- see QACheck 'grid:{label}:axes_mismatch'.",
+                            {"target": label, "variables": [v0, v], "axis": axis,
+                             "atol": 1e-6},
+                        )
         has_data_v, valid_v, window_days_v = scan_grid(
             ref_v,
             period=cfg.periods.calibration,
@@ -286,7 +308,6 @@ def _run_grid(
             has_data_v, valid_v, window_days_v
         )
 
-    v0 = variables[0]
     has_data = (
         has_data_by_var[v0]
         if len(variables) == 1
@@ -733,16 +754,24 @@ class _CombinedAdjustment:
 
 
 def _quantile_count(plan: CellPlan) -> int:
-    """Return configured nquantiles (including nested base_kws) for RAM estimation."""
-    train_params = dict(plan.train_params)
-    quantiles = train_params.get("nquantiles")
-    if quantiles is None:
-        base_kws = train_params.get("base_kws")
+    """Budget for the largest quantile table in train or adjustment parameters."""
+    counts = []
+    for pairs in (plan.train_params, plan.adjust_params):
+        params = dict(pairs)
+        containers = [params]
+        base_kws = params.get("base_kws")
         if isinstance(base_kws, dict):
-            quantiles = base_kws.get("nquantiles")
-    if quantiles is None:
-        quantiles = 50
-    return int(quantiles) if isinstance(quantiles, (int, np.integer)) else len(quantiles)
+            containers.append(base_kws)
+        base_kws_vars = params.get("base_kws_vars")
+        if isinstance(base_kws_vars, dict):
+            containers.extend(kws for kws in base_kws_vars.values() if isinstance(kws, dict))
+        for kws in containers:
+            quantiles = kws.get("nquantiles")
+            if quantiles is not None:
+                counts.append(
+                    int(quantiles) if isinstance(quantiles, (int, np.integer)) else len(quantiles)
+                )
+    return max(counts, default=50)
 
 
 def _concat_adj(parts: list[dict]) -> Any | None:

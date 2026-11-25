@@ -1253,3 +1253,44 @@ def test_run_target_grid_memory_estimate_uses_max_time_steps(grid_config, monkey
     )
     assert all(n == 2 and f == 1.5 for _, _, _, n, f in seen_steps)
 
+
+@pytest.mark.parametrize(
+    ("train_params", "adjust_params", "expected"),
+    [
+        ({}, {}, 50),
+        ({"nquantiles": 15}, {}, 15),
+        ({"nquantiles": np.int64(75)}, {}, 75),
+        ({"nquantiles": [0.1, 0.5, 0.9]}, {}, 3),
+        ({"base_kws": {"nquantiles": 200}}, {}, 200),
+        ({}, {"base_kws": {"nquantiles": 10_000}}, 10_000),
+        ({}, {"nquantiles": 300}, 300),
+        ({"nquantiles": 20, "base_kws": {"nquantiles": 400}}, {}, 400),
+        (
+            {"nquantiles": 20, "base_kws": {"nquantiles": 400}},
+            {"nquantiles": 600, "base_kws": {"nquantiles": 500}},
+            600,
+        ),
+        (
+            {"nquantiles": 20},
+            {"base_kws": {"nquantiles": np.linspace(0, 1, 100)}},
+            100,
+        ),
+        (
+            {"base_kws": {"nquantiles": 400}},
+            {"base_kws_vars": {"tmax": {"nquantiles": 800}}},
+            800,
+        ),
+    ],
+)
+def test_grid_quantile_count_uses_largest_known_parameter_path(
+    train_params, adjust_params, expected
+):
+    plan = CellPlan(
+        target_name="joint",
+        variables=("tmax", "precip"),
+        method="npdf_transform",
+        train_params=tuple(train_params.items()),
+        adjust_params=tuple(adjust_params.items()),
+    )
+    assert adjust._quantile_count(plan) == expected
+

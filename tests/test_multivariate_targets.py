@@ -333,3 +333,147 @@ def test_cancel_multivariate_target_retains_completed_and_skips_later(
     assert events[-1]["variable"] == "tmax"
     manifest = _write_and_read(out, cfg, tmp_path / "outputs")
     assert manifest["status"] == "cancelled"
+
+
+@pytest.fixture
+def joint_grid_inputs():
+    time = pd.date_range("2001-01-01", "2001-12-31")
+    rng = np.random.default_rng(42)
+    fields = {
+        name: xr.DataArray(
+            offset + rng.random((len(time), 2, 2)),
+            dims=("time", "lat", "lon"),
+            coords={"time": time, "lat": [10.0, 20.0], "lon": [100.0, 110.0]},
+            attrs={"units": units},
+        )
+        for name, offset, units in (
+            ("tmax", 25.0, "degC"), ("precip", 100.0, "mm d-1")
+        )
+    }
+    fields["precip"][0] = [[100.0, 101.0], [200.0, 201.0]]
+    references = {name: field.copy(deep=True) for name, field in fields.items()}
+    references["tmax"][:, 0, 1] = np.nan
+    references["precip"][:, 1, 1] = np.nan
+    # Geographic coordinates deliberately differ from the dimension indexes.
+    references = {
+        name: field.rename(lat="y", lon="x").assign_coords(
+            latitude=("y", field.lat.values), longitude=("x", field.lon.values),
+            y=[0, 1], x=[0, 1],
+        )
+        for name, field in references.items()
+    }
+    cfg = {
+        "variables": ["tmax", "precip"],
+        "grid": {
+            "path": "unused.nc", "workers": 1, "block_size": 1,
+            "var_map": {"tmax": "tmax", "precip": "precip"},
+        },
+        "model": {
+            "hist": "unused.nc", "sim": "unused.nc",
+            "var_map": {"tmax": "tmax", "precip": "precip"},
+        },
+        "periods": {"calibration": ["2001", "2001"]},
+        "targets": [{
+            "name": "joint", "variables": ["tmax", "precip"],
+            "method": "principal_components", "group": "none",
+        }],
+    }
+    return cfg, references, fields
+
+
+@pytest.mark.parametrize("reverse_dim", ["y", "x"])
+@pytest.mark.parametrize("reverse_variable", ["tmax", "precip"])
+@pytest.mark.parametrize("cached", [True, False])
+def test_multivariate_grid_reversed_axes_keep_values_at_true_coordinates(
+    joint_grid_inputs, monkeypatch, reverse_dim, reverse_variable, cached
+):
+    cfg, references, fields = joint_grid_inputs
+    references[reverse_variable] = references[reverse_variable].isel(
+        {reverse_dim: slice(None, None, -1)}
+    )
+    monkeypatch.setattr(
+        adjust, "open_grid_reference",
+        lambda grid, variable, qa: (references[variable], "latitude", "longitude"),
+    )
+    monkeypatch.setattr(
+        adjust, "load_model_variable", lambda model, kind, variable, qa: fields[variable]
+    )
+    if not cached:
+        monkeypatch.setattr(adjust, "read_grid_cells", lambda *args, **kwargs: None)
+
+    out = pipeline.run_pipeline(cfg)
+    assert out["variable_statuses"] == {"tmax": "ok", "precip": "ok"}
+    assert not [c.as_dict() for c in out["qa"] if c.status == "fail"]
+    precip = out["results"]["precip"]
+    obs = precip["hist_eval"]["obs"]
+    assert float(obs.sel(station="10.0000_100.0000").isel(time=0)) == 100.0
+    assert float(obs.sel(station="20.0000_100.0000").isel(time=0)) == 200.0
+    for name, result in out["results"].items():
+        grid = result["grid"]
+        np.testing.assert_array_equal(grid.lat, [10.0, 20.0])
+        np.testing.assert_array_equal(grid.lon, [100.0, 110.0])
+        assert grid.ids == ["10.0000_100.0000", "20.0000_100.0000"]
+        for lat in (10.0, 20.0):
+            np.testing.assert_allclose(
+                result["hist_eval"]["obs"].sel(station=f"{lat:.4f}_100.0000"),
+                fields[name].sel(lat=lat, lon=100.0),
+            )
+
+
+@pytest.mark.parametrize("axis", ["latitude", "longitude"])
+@pytest.mark.parametrize("mismatch", ["shifted", "shorter"])
+def test_multivariate_grid_axis_mismatch_fails_before_model_loading(
+    joint_grid_inputs, monkeypatch, axis, mismatch
+):
+    from bcflow.config_schema import load_config
+
+    raw, references, _ = joint_grid_inputs
+    ref = references["precip"]
+    dim = ref[axis].dims[0]
+    references["precip"] = (
+        ref.assign_coords({axis: ref[axis] + 1.0})
+        if mismatch == "shifted" else ref.isel({dim: [0]})
+    )
+    monkeypatch.setattr(
+        adjust, "open_grid_reference",
+        lambda grid, variable, qa: (references[variable], "latitude", "longitude"),
+    )
+
+    def unexpected_model_load(*args, **kwargs):
+        raise AssertionError("Mismatched reference axes must fail before model loading")
+
+    monkeypatch.setattr(adjust, "load_model_variable", unexpected_model_load)
+    cfg = load_config(raw)
+    qa = []
+    with pytest.raises(ValueError, match="axes_mismatch"):
+        adjust.run_target(cfg, cfg.resolved_targets()[0], qa)
+    check = next(c for c in qa if c.name == "grid:joint:axes_mismatch")
+    assert check.status == "fail"
+    assert "tmax" in check.message and "precip" in check.message
+    assert check.context["variables"] == ["tmax", "precip"]
+
+
+def test_multivariate_grid_coordinate_roundoff_preserves_reference_coordinates(
+    joint_grid_inputs, monkeypatch
+):
+    cfg, references, fields = joint_grid_inputs
+    ref = references["precip"]
+    references["precip"] = ref.assign_coords(
+        latitude=ref.latitude + 5e-7, longitude=ref.longitude + 5e-7
+    )
+    monkeypatch.setattr(
+        adjust, "open_grid_reference",
+        lambda grid, variable, qa: (references[variable], "latitude", "longitude"),
+    )
+    monkeypatch.setattr(
+        adjust, "load_model_variable", lambda model, kind, variable, qa: fields[variable]
+    )
+    out = pipeline.run_pipeline(cfg)
+    assert out["variable_statuses"] == {"tmax": "ok", "precip": "ok"}
+    assert not [c.as_dict() for c in out["qa"] if c.status == "fail"]
+    result = out["results"]["precip"]
+    np.testing.assert_array_equal(result["grid"].lat, [10.0, 20.0])
+    np.testing.assert_array_equal(result["grid"].lon, [100.0, 110.0])
+    assert float(
+        result["hist_eval"]["obs"].sel(station="10.0000_100.0000").isel(time=0)
+    ) == 100.0
