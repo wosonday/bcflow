@@ -63,6 +63,7 @@ def render() -> None:
         try:
             path = resolve_local_path(st.session_state[SessionKeys.CONFIG_PATH], manager.cwd)
             document = load_document(path)
+            document["text"] = document["text"].replace("\r\n", "\n").replace("\r", "\n")
             st.session_state[SessionKeys.DOCUMENT] = document
             st.session_state[SessionKeys.EDITOR_BUFFER] = document["text"]
             st.session_state[SessionKeys.CONFIG_EDITOR] = document["text"]
