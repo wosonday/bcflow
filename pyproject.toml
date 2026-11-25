@@ -1,6 +1,6 @@
 [project]
 name = "bcflow"
-version = "0.1.0"
+version = "0.2.0"
 description = "Config-driven bias-correction pipeline built on xsdba"
 readme = "README.md"
 authors = [{ name = "wosonday", email = "thanhsonmttn@gmail.com" }]
