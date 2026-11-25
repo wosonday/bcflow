@@ -315,6 +315,64 @@ def test_adjust_trained_matches_run_cell_without_duplicate_sample_size_qa():
     assert not any(c.name.startswith("grouping:") for c in precip_eval_qa)
 
 
+def test_adjust_trained_reuses_post_trained_without_retraining(monkeypatch):
+    ref = _make_dataset(years=4, start="2000-01-01", seed=41, dry_frac=0.4, scale=6.0)
+    hist = _make_dataset(years=4, start="2000-01-01", seed=42, dry_frac=0.6, scale=4.0)
+    sim = _make_dataset(years=4, start="2030-01-01", seed=43, dry_frac=0.5, scale=5.0)
+
+    plan = CellPlan(
+        target_name="precip",
+        variables=("precip",),
+        method="quantile_delta_mapping",
+        group="month",
+        train_params=(("nquantiles", 15),),
+        post=(
+            PostStep(
+                method="extreme_values",
+                train_params=(("q_thresh", 0.90),),
+                adjust_params=(("frac", 0.7), ("power", 3.0)),
+            ),
+        ),
+    )
+    res = run_cell(
+        plan,
+        ref=ref,
+        hist=hist,
+        sim=sim,
+        specs=_specs("precip"),
+        units=_units("precip"),
+        seed=SEED,
+    )
+    assert len(res.post_trained) == 1
+
+    def _no_retrain(*args, **kwargs):
+        raise AssertionError("ExtremeValues.train should not be called when post_trained is supplied")
+
+    monkeypatch.setattr(xsdba_adj.ExtremeValues, "train", classmethod(_no_retrain))
+
+    aligned_zeros = ZeroHandling(DEFAULTS["precip"], "mm d-1", seed=SEED)
+    aligned_zeros.jitter(ref["precip"])
+    aligned_zeros.jitter(hist["precip"])
+    eval_qa: list[QACheck] = []
+    scen = adjust_trained(
+        plan,
+        res.trained_obj,
+        sim=sim,
+        ref=ref,
+        hist=hist,
+        specs=_specs("precip"),
+        units=_units("precip"),
+        zeros=aligned_zeros,
+        post_trained=res.post_trained,
+        qa=eval_qa,
+    )
+    xr.testing.assert_equal(scen, res.scen)
+    assert any(
+        c.name == "post:precip:extreme_values" and c.status == "pass"
+        for c in eval_qa
+    )
+
+
 def test_extreme_values_post_step_and_step7_order(monkeypatch):
     ref = _make_dataset(years=4, start="2000-01-01", seed=41, dry_frac=0.4, scale=6.0)
     hist = _make_dataset(years=4, start="2000-01-01", seed=42, dry_frac=0.6, scale=4.0)
@@ -744,6 +802,7 @@ def test_pickle_roundtrip_cell_plan_and_cell_result():
         clip_counts=res.clip_counts,
         trained_obj=None,
         zeros=None,
+        post_trained=(),
     )
     res_rt = pickle.loads(pickle.dumps(res_for_ipc))
     xr.testing.assert_identical(res_rt.scen, res.scen)
@@ -753,3 +812,4 @@ def test_pickle_roundtrip_cell_plan_and_cell_result():
     assert res_rt.clip_counts == res.clip_counts
     assert res_rt.trained_obj is None
     assert res_rt.zeros is None
+    assert res_rt.post_trained == ()
