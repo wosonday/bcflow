@@ -160,7 +160,13 @@ def test_apply_adapt_freq_reproducible_and_emits_qa():
         ref_cal, hist_cal, "1 mm d-1", group, variable="precip", seed=SEED
     )
 
-    xr.testing.assert_identical(out1, out2)
+    # xsdba stamps attrs["history"] with a wall-clock timestamp, so assert_equal
+    # (values/coords, not attrs) plus explicit units checks stays reproducible
+    # without weakening the numerical comparison.
+    xr.testing.assert_equal(out1, out2)
+    assert out1.name == out2.name
+    assert out1.attrs.get("units") == out2.attrs.get("units")
+    assert out1.attrs.get("units") == ref_cal.attrs.get("units")
     assert qa1 == qa2
     assert qa1.name == "adapt_freq:precip:applied"
     assert qa1.status == "pass"
