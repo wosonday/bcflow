@@ -292,3 +292,100 @@ def test_unsupported_config_suffix_is_rejected(toy_config, tmp_path, capsys):
         "Unsupported config format"
         in json.loads(capsys.readouterr().out)["errors"][0]["message"]
     )
+
+
+@pytest.mark.parametrize(
+    ("method", "group"),
+    [
+        ("mbcn", "none"),
+        ("principal_components", "month"),
+        ("npdf_transform", "none"),
+    ],
+)
+def test_validate_accepts_multivariate_targets(
+    toy_config, tmp_path, capsys, method, group
+):
+    cfg = copy.deepcopy(toy_config)
+    cfg.pop("correction", None)
+    cfg["targets"] = [
+        {
+            "name": "joint",
+            "variables": ["tmax", "precip"],
+            "method": method,
+            "group": group,
+        }
+    ]
+
+    assert main(["validate", str(_write_config(tmp_path, cfg)), "--json"]) == 0
+    result = json.loads(capsys.readouterr().out)
+    assert result["valid"] is True and result["errors"] == []
+
+
+def test_validate_reports_target_semantic_errors(toy_config, tmp_path, capsys):
+    bad = copy.deepcopy(toy_config)
+    bad.pop("correction", None)
+    bad["targets"] = [
+        {
+            "name": "t_post",
+            "variables": ["tmax"],
+            "method": "extreme_values",  # family == "post"
+            "post": [
+                {"method": "scaling"},  # family != "post"
+                {"method": "does_not_exist"},
+            ],
+        },
+        {
+            "name": "t_adjust_only",
+            "variables": ["precip"],
+            "method": "npdf_transform",  # min_vars == 2 & adjust_only
+            "train_params": {"n_iter": 5},
+        },
+    ]
+
+    assert main(["validate", str(_write_config(tmp_path, bad)), "--json"]) == 1
+    messages = _errors_by_loc(json.loads(capsys.readouterr().out))
+
+    assert "family 'post'" in messages[("tmax", ("targets", 0, "method"))]
+    assert "family 'post'" in messages[("tmax", ("targets", 0, "post", 0, "method"))]
+    assert "not registered" in messages[("tmax", ("targets", 0, "post", 1, "method"))]
+    assert "at least 2 variables" in messages[("precip", ("targets", 1, "method"))]
+    assert "adjust_only" in messages[("precip", ("targets", 1, "train_params"))]
+
+    bad_unknown = copy.deepcopy(toy_config)
+    bad_unknown.pop("correction", None)
+    bad_unknown["targets"] = [
+        {"name": "joint", "variables": ["tmax", "precip"], "method": "does_not_exist"}
+    ]
+    assert main(["validate", str(_write_config(tmp_path, bad_unknown)), "--json"]) == 1
+    unknown_msgs = _errors_by_loc(json.loads(capsys.readouterr().out))
+    assert "not registered" in unknown_msgs[(None, ("targets", 0, "method"))]
+
+
+def test_validate_reports_otc_non_projection_and_missing_pot_on_targets(
+    toy_config, tmp_path, capsys, monkeypatch
+):
+    bad = copy.deepcopy(toy_config)
+    bad.pop("correction", None)
+    bad["targets"] = [
+        {
+            "name": "joint_otc",
+            "variables": ["tmax", "precip"],
+            "method": "otc",
+            "group": "none",
+        }
+    ]
+
+    real_find_spec = importlib.util.find_spec
+    monkeypatch.setattr(
+        importlib.util,
+        "find_spec",
+        lambda name, *args, **kwargs: None if name == "ot" else real_find_spec(name, *args, **kwargs),
+    )
+
+    assert main(["validate", str(_write_config(tmp_path, bad)), "--json"]) == 1
+    result = json.loads(capsys.readouterr().out)
+    target_msgs = [
+        e["message"] for e in result["errors"] if e["loc"] == ["targets", 0, "method"]
+    ]
+    assert any("does not support projection" in m for m in target_msgs)
+    assert any("POT" in m and "pip install POT" in m for m in target_msgs)

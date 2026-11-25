@@ -22,7 +22,7 @@ from pydantic import ValidationError
 
 from ._version import bcflow_version
 from .config_loader import load_config_file
-from .config_schema import PipelineConfig, StationsConfig, load_config
+from .config_schema import PipelineConfig, PostConfig, StationsConfig, load_config
 from .coverage import check_coverage
 from .discovery import METHOD_META_BY_NAME, list_methods
 from .loaders import (
@@ -148,96 +148,164 @@ def _grid_errors(cfg: PipelineConfig) -> list[dict]:
     return errors
 
 
-def _semantic_errors(cfg: PipelineConfig) -> list[dict]:
-    """Checks the schema alone cannot do: registered methods, existing inputs."""
+def _validate_method_entry(
+    method: str,
+    *,
+    prefix: list[Any],
+    variable: str | None,
+    n_vars: int,
+    has_train_params: bool,
+    check_projection: bool,
+    min_vars_hint: str | None = None,
+) -> list[dict]:
+    """Validate one primary correction method entry and collect all errors."""
     errors: list[dict] = []
-    for v in cfg.variables:
-        method = cfg.spec(v).method
-        override = cfg.correction.get(v)
-        if method not in METHOD_META_BY_NAME:
+    method_loc = [*prefix, "method"]
+    if method not in METHOD_META_BY_NAME:
+        errors.append(
+            {
+                "variable": variable,
+                "loc": method_loc,
+                "message": f"Method '{method}' is not registered. Valid methods: {sorted(METHOD_META_BY_NAME)}.",
+            }
+        )
+        return errors
+
+    meta = METHOD_META_BY_NAME[method]
+    if meta.family == "post":
+        errors.append(
+            {
+                "variable": variable,
+                "loc": method_loc,
+                "message": (
+                    f"Method '{method}' has family 'post' and is only valid "
+                    "as a 'post:' step."
+                ),
+            }
+        )
+    if n_vars < meta.min_vars:
+        message = (
+            min_vars_hint
+            or f"Method '{method}' requires at least {meta.min_vars} variables, got {n_vars}."
+        )
+        errors.append({"variable": variable, "loc": method_loc, "message": message})
+    if meta.family == "adjust_only" and has_train_params:
+        errors.append(
+            {
+                "variable": variable,
+                "loc": [*prefix, "train_params"],
+                "message": (
+                    f"Method '{method}' has family 'adjust_only' and does not "
+                    "accept 'train_params'; remove it."
+                ),
+            }
+        )
+    if check_projection and not meta.supports_projection:
+        errors.append(
+            {
+                "variable": variable,
+                "loc": method_loc,
+                "message": (
+                    f"Method '{method}' does not support projection onto 'sim'."
+                ),
+            }
+        )
+    try:
+        check_available(get_method(method))
+    except ValueError as exc:
+        errors.append({"variable": variable, "loc": method_loc, "message": str(exc)})
+    return errors
+
+
+def _validate_post_steps(
+    post_steps: list[PostConfig],
+    *,
+    prefix: list[Any],
+    variable: str | None,
+) -> list[dict]:
+    """Validate every post-processing step under `prefix`."""
+    errors: list[dict] = []
+    for idx, step in enumerate(post_steps):
+        loc = [*prefix, "post", idx, "method"]
+        if step.method not in METHOD_META_BY_NAME:
             errors.append(
                 {
-                    "variable": v,
-                    "loc": ["correction", v, "method"],
-                    "message": f"Method '{method}' is not registered. Valid methods: {sorted(METHOD_META_BY_NAME)}.",
+                    "variable": variable,
+                    "loc": loc,
+                    "message": f"Method '{step.method}' is not registered. Valid methods: {sorted(METHOD_META_BY_NAME)}.",
+                }
+            )
+        elif METHOD_META_BY_NAME[step.method].family != "post":
+            errors.append(
+                {
+                    "variable": variable,
+                    "loc": loc,
+                    "message": (
+                        f"Post-step method '{step.method}' must have family "
+                        f"'post', got '{METHOD_META_BY_NAME[step.method].family}'."
+                    ),
                 }
             )
         else:
-            meta = METHOD_META_BY_NAME[method]
-            if meta.family == "post":
-                errors.append(
-                    {
-                        "variable": v,
-                        "loc": ["correction", v, "method"],
-                        "message": (
-                            f"Method '{method}' has family 'post' and is only valid "
-                            "as a 'post:' step."
-                        ),
-                    }
-                )
-            if meta.min_vars > 1:
-                errors.append(
-                    {
-                        "variable": v,
-                        "loc": ["correction", v, "method"],
-                        "message": (
-                            f"Method '{method}' requires at least {meta.min_vars} "
-                            "variables and needs 'targets:' (Phase 4)."
-                        ),
-                    }
-                )
-            if (
-                meta.family == "adjust_only"
-                and override is not None
-                and override.train_params
-            ):
-                errors.append(
-                    {
-                        "variable": v,
-                        "loc": ["correction", v, "train_params"],
-                        "message": (
-                            f"Method '{method}' has family 'adjust_only' and does not "
-                            "accept 'train_params'; remove it."
-                        ),
-                    }
-                )
             try:
-                check_available(get_method(method))
+                check_available(get_method(step.method))
             except ValueError as exc:
-                errors.append(
-                    {
-                        "variable": v,
-                        "loc": ["correction", v, "method"],
-                        "message": str(exc),
-                    }
-                )
+                errors.append({"variable": variable, "loc": loc, "message": str(exc)})
+    return errors
 
-        for idx, step in enumerate(override.post if override else ()):
-            loc = ["correction", v, "post", idx, "method"]
-            if step.method not in METHOD_META_BY_NAME:
-                errors.append(
-                    {
-                        "variable": v,
-                        "loc": loc,
-                        "message": f"Method '{step.method}' is not registered. Valid methods: {sorted(METHOD_META_BY_NAME)}.",
-                    }
+
+def _semantic_errors(cfg: PipelineConfig) -> list[dict]:
+    """Checks the schema alone cannot do: registered methods, existing inputs."""
+    errors: list[dict] = []
+    if cfg.targets is None:
+        for v in cfg.variables:
+            method = cfg.spec(v).method
+            override = cfg.correction.get(v)
+            meta = METHOD_META_BY_NAME.get(method)
+            errors.extend(
+                _validate_method_entry(
+                    method,
+                    prefix=["correction", v],
+                    variable=v,
+                    n_vars=1,
+                    has_train_params=bool(override is not None and override.train_params),
+                    check_projection=False,
+                    min_vars_hint=(
+                        f"Method '{method}' requires at least {meta.min_vars} "
+                        "variables and needs 'targets:' (Phase 4)."
+                        if meta is not None
+                        else None
+                    ),
                 )
-            elif METHOD_META_BY_NAME[step.method].family != "post":
-                errors.append(
-                    {
-                        "variable": v,
-                        "loc": loc,
-                        "message": (
-                            f"Post-step method '{step.method}' must have family "
-                            f"'post', got '{METHOD_META_BY_NAME[step.method].family}'."
-                        ),
-                    }
+            )
+            errors.extend(
+                _validate_post_steps(
+                    override.post if override else [],
+                    prefix=["correction", v],
+                    variable=v,
                 )
-            else:
-                try:
-                    check_available(get_method(step.method))
-                except ValueError as exc:
-                    errors.append({"variable": v, "loc": loc, "message": str(exc)})
+            )
+    else:
+        for idx, target in enumerate(cfg.targets):
+            target_var = target.variables[0] if len(target.variables) == 1 else None
+            prefix: list[Any] = ["targets", idx]
+            errors.extend(
+                _validate_method_entry(
+                    target.method,
+                    prefix=prefix,
+                    variable=target_var,
+                    n_vars=len(target.variables),
+                    has_train_params=bool(target.train_params),
+                    check_projection=True,
+                )
+            )
+            errors.extend(
+                _validate_post_steps(
+                    target.post,
+                    prefix=prefix,
+                    variable=target_var,
+                )
+            )
 
     if cfg.stations is not None:
         errors += _station_errors(cfg.stations)
