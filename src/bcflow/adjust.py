@@ -51,6 +51,7 @@ from .loaders import (
     scan_grid,
 )
 from .methods import METHOD_REGISTRY
+from .preprocess import SEED, ZeroHandling as _ZeroHandling
 from .progress import RunControl
 from .qa import QACheck
 from .regrid import TargetGrid, model_box, regrid_to_points
@@ -66,7 +67,7 @@ _DEFAULT_WET_DAY = "1 mm d-1"
 
 # Fixed seed for the random steps (jitter of exact zeros, adapt_freq), so
 # two runs on the same data write identical files.
-_SEED = 0
+_SEED = SEED
 
 
 def run_variable(
@@ -608,34 +609,6 @@ def _check_method(spec: VariableSpec, qa: list[QACheck]) -> None:
             )
         )
         raise ValueError(f"Invalid method for variable '{spec.name}': {spec.method!r}")
-
-
-class _ZeroHandling:
-    """Jitter exact zeros below spec.jitter_under_thresh before xsdba sees
-    the data, and set the values below it back to 0 afterwards.
-
-    The same as xsdba.processing.jitter_under_thresh, but with a seeded
-    random generator so two runs on the same data give identical files.
-    """
-
-    def __init__(self, spec: VariableSpec, units: str):
-        self.thresh = (
-            float(convert_units_to(spec.jitter_under_thresh, units))
-            if spec.jitter_under_thresh
-            else None
-        )
-        self.rng = np.random.default_rng(_SEED)
-
-    def jitter(self, da: xr.DataArray) -> xr.DataArray:
-        if self.thresh is None:
-            return da
-        noise = self.rng.uniform(np.nextafter(0.0, 1.0), self.thresh, size=da.shape)
-        return da.where(~((da < self.thresh) & da.notnull()), noise)
-
-    def restore(self, da: xr.DataArray) -> xr.DataArray:
-        if self.thresh is None:
-            return da
-        return da.where(~(da < self.thresh), 0.0)
 
 
 def _non_finite(scen: xr.DataArray, sim: xr.DataArray) -> list[str]:
