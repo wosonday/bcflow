@@ -37,6 +37,7 @@ from xsdba.units import convert_units_to
 
 from .config_schema import PeriodsConfig, PipelineConfig
 from .coverage import check_coverage, coverage_table_from_counts, report_coverage
+from .discovery import get_method_meta
 from .evaluate import evaluate, paired_series, summarize
 from .extract import extract_nearest
 from .grouping import build_grouper
@@ -56,7 +57,7 @@ from .regrid import TargetGrid, model_box, regrid_to_points
 from .resources import WorkerPool, estimate_task_bytes, select_workers
 from .timeaxis import align_daily
 from .units import harmonize
-from .variables import VariableSpec
+from .variables import VariableSpec, resolve_method_params
 
 # Wet-day threshold for evaluating precipitation when the config gives none:
 # 1 mm/d, the ETCCDI convention (Zhang et al., 2011, WIREs Climate Change
@@ -223,7 +224,7 @@ def _run_grid(
     parts = []
     block_size = grid_cfg.block_size
     total_blocks = (target.size + block_size - 1) // block_size
-    quantiles = spec.train_params.get("nquantiles", 50)
+    quantiles = resolve_method_params(spec, get_method_meta(spec.method))[0].get("nquantiles", 50)
     quantile_count = quantiles if isinstance(quantiles, int) else len(quantiles)
     groups = {"month": 12, "dayofyear": 366, "none": 1}[spec.group]
     completed_cells = 0
@@ -483,7 +484,7 @@ def _correct(
             )
         )
 
-    train_kwargs = {**spec.train_params, "group": group, "kind": spec.kind}
+    train_kwargs = {**resolve_method_params(spec, get_method_meta(spec.method))[0], "group": group, "kind": spec.kind}
     adj = METHOD_REGISTRY[spec.method].train(ref_cal, hist_train, **train_kwargs)
     control.progress(variable, "adjustment", **context)
     scen = _adjust(adj, sim, spec, zeros)
@@ -649,7 +650,7 @@ def _non_finite(scen: xr.DataArray, sim: xr.DataArray) -> list[str]:
 def _adjust(
     adj, da: xr.DataArray, spec: VariableSpec, zeros: _ZeroHandling
 ) -> xr.DataArray:
-    out = zeros.restore(adj.adjust(zeros.jitter(da), **spec.adjust_params))
+    out = zeros.restore(adj.adjust(zeros.jitter(da), **resolve_method_params(spec, get_method_meta(spec.method))[1]))
     low, high = spec.bounds
     if low is not None or high is not None:
         # Quantile mapping can step outside physical limits (e.g. negative
