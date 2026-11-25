@@ -68,8 +68,46 @@ def _write_netcdf(
 
     A DataArray with no name yet (the `scen` case) must be wrapped into a
     Dataset first, since NetCDF always needs a variable name to write.
+    Sanitize multivariate xsdba metadata on a shallow copy to preserve the
+    live adjustment object and its numerical data.
     """
     data = obj.to_dataset(name=var_name) if isinstance(obj, xr.DataArray) else obj
+    data = data.copy(deep=False)
+
+    def json_value(value):
+        if isinstance(value, dict):
+            return {str(key): json_value(item) for key, item in value.items()}
+        if isinstance(value, (list, tuple)):
+            return [json_value(item) for item in value]
+        if isinstance(value, (bool, np.bool_)):
+            return int(value)
+        if value is None or isinstance(value, (str, int, float)):
+            return value
+        if isinstance(value, np.integer):
+            return int(value)
+        if isinstance(value, np.floating):
+            return float(value)
+        return str(value)
+
+    def safe_attr(value):
+        clean = json_value(value)
+        if isinstance(value, (list, tuple)) and all(
+            isinstance(item, (str, int, float, np.integer, np.floating))
+            and not isinstance(item, (bool, np.bool_))
+            for item in value
+        ):
+            return clean
+        if clean is None or isinstance(clean, (dict, list)):
+            # JSON handles nested/ragged containers without coercing them to arrays.
+            return json.dumps(clean)
+        return clean
+
+    for item in [data, *data.variables.values()]:
+        item.attrs = {key: safe_attr(value) for key, value in item.attrs.items()}
+    for name in data.coords:
+        coord = data[name]
+        if coord.dtype == object and all(isinstance(v, str) for v in coord.values.ravel()):
+            data = data.assign_coords({name: coord.astype(str)})
     data.to_netcdf(path)
     return path
 

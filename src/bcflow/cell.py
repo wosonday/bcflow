@@ -320,9 +320,14 @@ def _train(
     ref_t: xr.DataArray,
     hist_t: xr.DataArray,
     train_kws: dict[str, Any],
+    *,
+    seed: int = SEED,
 ) -> tuple[Any | None, xr.Dataset | None]:
     """Step 5: fit train_adjust methods; return (None, None) for adjust_only."""
     if method.family == "train_adjust":
+        if method.name == "mbcn":
+            # xsdba's random rotations draw from NumPy's global generator.
+            np.random.seed(seed)
         trained = method.cls.train(ref_t, hist_t, **train_kws)
         return trained, trained.ds
     return None, None
@@ -344,6 +349,8 @@ def _adjust(
     sim_t: xr.DataArray,
     adjust_kws: dict[str, Any],
     zeros: ZeroHandling | None,
+    *,
+    seed: int = SEED,
 ) -> tuple[xr.DataArray, xr.DataArray]:
     """Step 6: jitter sim (if active), run adjust, and unwrap NpdfTransform Datasets."""
     if zeros is not None:
@@ -360,10 +367,13 @@ def _adjust(
 
     if method.family == "train_adjust":
         if method.name == "mbcn":
+            np.random.seed(seed)
             scen_t = trained.adjust(sim_t, ref_t, hist_t, **adjust_kws)
         else:
             scen_t = trained.adjust(sim_t, **adjust_kws)
     elif method.supports_projection:
+        if method.name == "npdf_transform":
+            np.random.seed(seed)
         scen_t = method.cls.adjust(ref_t, hist_t, sim_t, **adjust_kws)
     else:
         scen_t = method.cls.adjust(ref_t, hist_t, **adjust_kws)
@@ -540,14 +550,14 @@ def run_cell(
         control.check_cancelled()
 
     t0 = monotonic()
-    trained, trained_ds = _train(method, ref_t, hist_t, train_kws)
+    trained, trained_ds = _train(method, ref_t, hist_t, train_kws, seed=seed)
     timing["train"] = round(monotonic() - t0, 6)
 
     if control is not None:
         control.check_cancelled()
 
     t0 = monotonic()
-    scen_t, sim_t = _adjust(method, trained, ref_t, hist_t, sim_t, adjust_kws, zeros)
+    scen_t, sim_t = _adjust(method, trained, ref_t, hist_t, sim_t, adjust_kws, zeros, seed=seed)
     timing["adjust"] = round(monotonic() - t0, 6)
 
     t0 = monotonic()
