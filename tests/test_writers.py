@@ -6,6 +6,7 @@ import copy
 import json
 from typing import get_args
 
+import numpy as np
 import pandas as pd
 import xarray as xr
 import yaml
@@ -13,6 +14,7 @@ import yaml
 from bcflow.cli import main
 from bcflow.config_schema import OutputConfig, OutputFormat
 from bcflow.pipeline import run_pipeline
+from bcflow.regrid import TargetGrid
 from bcflow.writers import _WRITERS, write_run
 
 
@@ -162,3 +164,56 @@ def test_cli_rejects_invalid_output_section_before_running(
     assert main(["run", str(config_file)]) == 2
     assert "formats" in capsys.readouterr().err
     assert not (tmp_path / "outputs").exists()
+
+
+def test_write_run_with_adj_none_for_station_and_grid(tmp_path):
+    time = pd.date_range("2030-01-01", periods=3, freq="D")
+    station_scen = xr.DataArray(
+        np.ones((3, 2), dtype="float32"),
+        dims=("time", "station"),
+        coords={"time": time, "station": ["ST01", "ST02"]},
+        attrs={"units": "degC"},
+    )
+    grid = TargetGrid(
+        lat=np.array([15.0, 16.0]),
+        lon=np.array([105.0, 106.0]),
+        iy=np.array([0, 1]),
+        ix=np.array([0, 1]),
+    )
+    grid_scen = xr.DataArray(
+        np.full((3, grid.size), 2.0, dtype="float32"),
+        dims=("time", "station"),
+        coords={"time": time, "station": grid.ids},
+        attrs={"units": "mm d-1"},
+    )
+    out = {
+        "results": {
+            "tmax": {
+                "scen": station_scen,
+                "adj": None,
+                "evaluation": None,
+                "hist_eval": None,
+                "grid": None,
+            },
+            "precip": {
+                "scen": grid_scen,
+                "adj": None,
+                "evaluation": None,
+                "hist_eval": None,
+                "grid": grid,
+            },
+        },
+        "qa": [],
+    }
+
+    manifest_path = write_run(out, OutputConfig(path=str(tmp_path), formats=["netcdf"]))
+    run_dir = manifest_path.parent
+    manifest = _read_json(manifest_path)
+
+    assert manifest["schema_version"] == 1
+    assert manifest["variables"]["tmax"]["adj"] is None
+    assert manifest["variables"]["precip"]["adj"] is None
+    assert not (run_dir / "tmax" / "adj.nc").exists()
+    assert not (run_dir / "precip" / "adj.nc").exists()
+    assert (run_dir / "tmax" / "scen.nc").is_file()
+    assert (run_dir / "precip" / "scen.nc").is_file()

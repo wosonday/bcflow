@@ -173,3 +173,24 @@ def test_invalid_config_raises_before_running(toy_config):
     bad["correction"]["tmax"]["adapt_freq"] = True  # no threshold for tmax
     with pytest.raises(ValidationError, match="adapt_freq_thresh"):
         run_pipeline(bad)
+
+
+def test_scaling_and_loci_run_end_to_end_with_string_stations(toy_config):
+    cfg = copy.deepcopy(toy_config)
+    cfg["correction"] = {
+        "tmax": {"method": "scaling", "group": "month"},
+        "precip": {"method": "loci", "group": "month"},
+    }
+
+    out = run_pipeline(cfg)
+
+    assert all(c.status != "fail" for c in out["qa"]), [
+        c.as_dict() for c in out["qa"] if c.status == "fail"
+    ]
+    assert out["results"]["tmax"] is not None
+    assert out["results"]["precip"] is not None
+    assert float(out["results"]["precip"]["scen"].min()) >= 0.0
+    assert out["results"]["precip"]["evaluation"] is not None
+    assert np.isfinite(
+        out["results"]["precip"]["evaluation"].select_dtypes("number").to_numpy()
+    ).all()

@@ -242,7 +242,7 @@ def write_result(
         scen_paths, hist_eval_paths = _write_grid(
             scen, hist_eval, grid, var_dir, var_name, formats
         )
-        adj_path = _write_netcdf(adj.ds, var_dir / "adj.nc")
+        adj_path = None if adj is None else _write_netcdf(adj.ds, var_dir / "adj.nc")
         eval_path = None
         if evaluation is not None:
             eval_path = var_dir / "evaluation.csv"
@@ -264,7 +264,7 @@ def write_result(
             scen, var_dir / f"scen.{_EXTENSIONS[fmt]}", var_name
         )
 
-    adj_path = _write_netcdf(adj.ds, var_dir / "adj.nc")
+    adj_path = None if adj is None else _write_netcdf(adj.ds, var_dir / "adj.nc")
 
     eval_path = None
     if evaluation is not None:

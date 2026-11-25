@@ -13,8 +13,8 @@ import xarray as xr
 import xsdba
 import xsdba.adjustment as xsdba_adj
 
-from bcflow.cell import STACK_DIM, CellPlan, CellResult, PostStep, run_cell
-from bcflow.preprocess import SEED
+from bcflow.cell import STACK_DIM, CellPlan, CellResult, PostStep, adjust_trained, run_cell
+from bcflow.preprocess import SEED, ZeroHandling
 from bcflow.progress import RunCancelled, RunControl
 from bcflow.qa import QACheck
 from bcflow.variables import DEFAULTS, VariableSpec
@@ -210,6 +210,109 @@ def test_loci_injects_thresh_via_registry_defaults():
     assert res.scen["precip"].dims == ("time", "station")
     assert res.scen["precip"].attrs["units"] == "mm d-1"
     assert "preprocess:precip:jitter" not in {c.name for c in res.qa}
+
+
+def test_loci_defaults_interp_nearest_on_string_station_coords():
+    ref = _make_dataset(years=2, start="2000-01-01", seed=34, dry_frac=0.4).assign_coords(
+        station=["ST01", "ST02"]
+    )
+    hist = _make_dataset(years=2, start="2000-01-01", seed=35, dry_frac=0.7).assign_coords(
+        station=["ST01", "ST02"]
+    )
+    sim = _make_dataset(years=2, start="2030-01-01", seed=36, dry_frac=0.6).assign_coords(
+        station=["ST01", "ST02"]
+    )
+
+    plan = CellPlan(
+        target_name="precip",
+        variables=("precip",),
+        method="loci",
+        group="month",
+    )
+    res = run_cell(
+        plan,
+        ref=ref,
+        hist=hist,
+        sim=sim,
+        specs=_specs("precip"),
+        units=_units("precip"),
+    )
+    assert res.trained_ds is not None
+    assert res.scen["precip"].dims == ("time", "station")
+    assert res.scen["precip"].coords["station"].values.tolist() == ["ST01", "ST02"]
+    assert float(res.scen["precip"].min()) >= 0.0
+
+
+def test_adjust_trained_matches_run_cell_without_duplicate_sample_size_qa():
+    ref = _make_dataset(years=2, start="2000-01-01", seed=37, dry_frac=0.4)
+    hist = _make_dataset(years=2, start="2000-01-01", seed=38, dry_frac=0.7)
+    sim = _make_dataset(years=2, start="2030-01-01", seed=39, dry_frac=0.6)
+
+    tmax_plan = CellPlan(
+        target_name="tmax",
+        variables=("tmax",),
+        method="quantile_delta_mapping",
+        group="month",
+        train_params=(("nquantiles", 15),),
+    )
+    tmax_res = run_cell(
+        tmax_plan,
+        ref=ref,
+        hist=hist,
+        sim=sim,
+        specs=_specs("tmax"),
+        units=_units("tmax"),
+        seed=SEED,
+    )
+    tmax_eval_qa: list[QACheck] = []
+    tmax_scen = adjust_trained(
+        tmax_plan,
+        tmax_res.trained_obj,
+        sim=sim,
+        ref=ref,
+        hist=hist,
+        specs=_specs("tmax"),
+        units=_units("tmax"),
+        zeros=tmax_res.zeros,
+        qa=tmax_eval_qa,
+    )
+    xr.testing.assert_identical(tmax_scen, tmax_res.scen)
+    assert not any(c.name.startswith("grouping:") for c in tmax_eval_qa)
+
+    precip_plan = CellPlan(
+        target_name="precip",
+        variables=("precip",),
+        method="quantile_delta_mapping",
+        group="month",
+        train_params=(("nquantiles", 15),),
+    )
+    precip_res = run_cell(
+        precip_plan,
+        ref=ref,
+        hist=hist,
+        sim=sim,
+        specs=_specs("precip"),
+        units=_units("precip"),
+        seed=SEED,
+    )
+    # Match the RNG state right after ref & hist jitter (before sim jitter).
+    aligned_zeros = ZeroHandling(DEFAULTS["precip"], "mm d-1", seed=SEED)
+    aligned_zeros.jitter(ref["precip"])
+    aligned_zeros.jitter(hist["precip"])
+    precip_eval_qa: list[QACheck] = []
+    precip_scen = adjust_trained(
+        precip_plan,
+        precip_res.trained_obj,
+        sim=sim,
+        ref=ref,
+        hist=hist,
+        specs=_specs("precip"),
+        units=_units("precip"),
+        zeros=aligned_zeros,
+        qa=precip_eval_qa,
+    )
+    xr.testing.assert_equal(precip_scen, precip_res.scen)
+    assert not any(c.name.startswith("grouping:") for c in precip_eval_qa)
 
 
 def test_extreme_values_post_step_and_step7_order(monkeypatch):
@@ -632,6 +735,7 @@ def test_pickle_roundtrip_cell_plan_and_cell_result():
         specs=_specs("precip"),
         units=_units("precip"),
     )
+    assert res.zeros is not None
     res_for_ipc = CellResult(
         scen=res.scen,
         trained_ds=res.trained_ds,
@@ -639,6 +743,7 @@ def test_pickle_roundtrip_cell_plan_and_cell_result():
         timing=res.timing,
         clip_counts=res.clip_counts,
         trained_obj=None,
+        zeros=None,
     )
     res_rt = pickle.loads(pickle.dumps(res_for_ipc))
     xr.testing.assert_identical(res_rt.scen, res.scen)
@@ -647,3 +752,4 @@ def test_pickle_roundtrip_cell_plan_and_cell_result():
     assert res_rt.timing == res.timing
     assert res_rt.clip_counts == res.clip_counts
     assert res_rt.trained_obj is None
+    assert res_rt.zeros is None

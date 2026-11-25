@@ -48,7 +48,7 @@ class CellPlan:
 
 @dataclass
 class CellResult:
-    """Pickle-safe result from executing a CellPlan (strip trained_obj before IPC)."""
+    """Pickle-safe result from executing a CellPlan (strip trained_obj and zeros before IPC)."""
 
     scen: xr.Dataset
     trained_ds: xr.Dataset | None
@@ -56,6 +56,7 @@ class CellResult:
     timing: dict[str, float]
     clip_counts: dict[str, tuple[int, int]] = field(default_factory=dict)
     trained_obj: Any | None = None
+    zeros: ZeroHandling | None = None
 
 
 def _validate(
@@ -195,6 +196,8 @@ def _fill_registry_defaults(
     specs: dict[str, VariableSpec],
     ref_t: xr.DataArray,
     qa: list[QACheck],
+    *,
+    emit_sample_size_qa: bool = True,
 ) -> tuple[dict[str, Any], dict[str, Any], Grouper]:
     """Step 3: resolve params, inject registry_defaults, build Grouper, and emit sample-size QA."""
     primary_spec = specs[plan.variables[0]]
@@ -208,7 +211,7 @@ def _fill_registry_defaults(
 
     grouper = build_grouper(plan.group, window=plan.window, pool_dims=plan.pool_dims)
 
-    if "nquantiles" in train_kws:
+    if emit_sample_size_qa and "nquantiles" in train_kws:
         nq_val = train_kws["nquantiles"]
         nquantiles = int(nq_val) if isinstance(nq_val, (int, np.integer)) else len(nq_val)
         n_years = max(0, round(ref_t.sizes["time"] / 365.25))
@@ -318,6 +321,14 @@ def _train(
     return None, None
 
 
+def _has_string_non_time_coord(da: xr.DataArray) -> bool:
+    """Return True when any non-time coordinate has string or object dtype."""
+    return any(
+        name != "time" and coord.dtype.kind in ("U", "S", "O", "T")
+        for name, coord in da.coords.items()
+    )
+
+
 def _adjust(
     method: MethodSpec,
     trained: Any | None,
@@ -330,6 +341,15 @@ def _adjust(
     """Step 6: jitter sim (if active), run adjust, and unwrap NpdfTransform Datasets."""
     if zeros is not None:
         sim_t = zeros.jitter(sim_t)
+
+    # xsdba's LOCI defaults interp="linear", which raises UFuncTypeError in
+    # xsdba.utils.broadcast on string station coordinates unless overridden.
+    if (
+        method.name == "loci"
+        and "interp" not in adjust_kws
+        and _has_string_non_time_coord(sim_t)
+    ):
+        adjust_kws = {**adjust_kws, "interp": "nearest"}
 
     if method.family == "train_adjust":
         if method.name == "mbcn":
@@ -524,4 +544,52 @@ def run_cell(
         timing=timing,
         clip_counts=clip_counts,
         trained_obj=trained,
+        zeros=zeros,
     )
+
+
+def adjust_trained(
+    plan: CellPlan,
+    trained_obj: Any,
+    *,
+    sim: xr.Dataset,
+    ref: xr.Dataset,
+    hist: xr.Dataset,
+    specs: dict[str, VariableSpec],
+    units: dict[str, str],
+    zeros: ZeroHandling | None = None,
+    qa: list[QACheck] | None = None,
+) -> xr.Dataset:
+    """Apply Steps 6-7 of the cell contract using an already-trained object.
+
+    Intended for evaluation blocks that reuse a fitted ``trained_obj`` and
+    ``ZeroHandling`` state without re-training or re-emitting sample-size QA.
+    """
+    if qa is None:
+        qa = []
+    method = _validate(plan, specs, qa)
+    if method.family == "train_adjust" and trained_obj is None:
+        raise ValueError(f"trained_obj is required for method '{method.name}'.")
+
+    multivariate = method.min_vars > 1
+    ref_t = _to_tensor(ref, plan.variables, multivariate=multivariate, units=units)
+    hist_t = _to_tensor(hist, plan.variables, multivariate=multivariate, units=units)
+    sim_t = _to_tensor(sim, plan.variables, multivariate=multivariate, units=units)
+
+    _, adjust_kws, _ = _fill_registry_defaults(
+        plan, method, specs, ref_t, qa, emit_sample_size_qa=False
+    )
+    scen_t, sim_t = _adjust(method, trained_obj, ref_t, hist_t, sim_t, adjust_kws, zeros)
+    scen, _ = _finalize(
+        scen_t,
+        plan=plan,
+        ref_t=ref_t,
+        hist_t=hist_t,
+        sim_t=sim_t,
+        specs=specs,
+        units=units,
+        zeros=zeros,
+        multivariate=multivariate,
+        qa=qa,
+    )
+    return scen
