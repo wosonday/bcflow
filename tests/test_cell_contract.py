@@ -276,7 +276,11 @@ def test_adjust_trained_matches_run_cell_without_duplicate_sample_size_qa():
         zeros=tmax_res.zeros,
         qa=tmax_eval_qa,
     )
-    xr.testing.assert_identical(tmax_scen, tmax_res.scen)
+    # xsdba stamps a wall-clock time into attrs["history"], so compare values
+    # and the meaningful unit metadata rather than identical attrs.
+    xr.testing.assert_equal(tmax_scen, tmax_res.scen)
+    assert tmax_scen["tmax"].attrs["units"] == tmax_res.scen["tmax"].attrs["units"]
+    assert tmax_scen["tmax"].attrs["units"] == "degC"
     assert not any(c.name.startswith("grouping:") for c in tmax_eval_qa)
 
     precip_plan = CellPlan(

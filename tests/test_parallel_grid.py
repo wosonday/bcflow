@@ -92,6 +92,63 @@ def test_two_process_grid_matches_sequential(grid_config, monkeypatch, variable)
         xr.testing.assert_allclose(sequential["hist_eval"], parallel["hist_eval"])
 
 
+def test_two_process_grid_with_post_matches_sequential(grid_config, monkeypatch):
+    raw = copy.deepcopy(grid_config)
+    raw["variables"] = ["precip"]
+    raw["correction"] = {
+        "precip": {
+            "method": "quantile_delta_mapping",
+            "group": "month",
+            "train_params": {"nquantiles": 15},
+            "post": [{"method": "extreme_values"}],
+        }
+    }
+    raw["grid"].update(region={"lat": [15, 16], "lon": [105, 107]}, block_size=3)
+    raw["periods"] = {"calibration": ["2000", "2001"], "validation": ["2002", "2002"]}
+    # Slice in the parent: workers still execute the real correction, including
+    # the post step, on full (selected) time series.
+    open_reference = adjust.open_grid_reference
+    load_model = adjust.load_model_variable
+
+    def short_reference(*args, **kwargs):
+        ref, lat, lon = open_reference(*args, **kwargs)
+        return ref.sel(time=slice("2000", "2002")), lat, lon
+
+    def short_model(*args, **kwargs):
+        return load_model(*args, **kwargs).sel(time=slice("2000", "2002"))
+
+    def select(requested, fraction, remaining, estimated):
+        assert fraction == 0.6
+        return _selection(min(requested, remaining), estimated)
+
+    monkeypatch.setattr(adjust, "open_grid_reference", short_reference)
+    monkeypatch.setattr(adjust, "load_model_variable", short_model)
+    monkeypatch.setattr(adjust, "select_workers", select)
+    outputs = []
+    for workers in (1, 2):
+        raw["grid"]["workers"] = workers
+        qa = []
+        result = adjust.run_variable(
+            load_config(raw), "precip", qa, control=RunControl(lambda e: None)
+        )
+        assert not [check.message for check in qa if check.status == "fail"]
+        assert any(
+            check.name == "post:precip:extreme_values" and check.status == "pass"
+            for check in qa
+        )
+        outputs.append(result)
+
+    sequential, parallel = outputs
+    assert sequential["grid"].size == parallel["grid"].size == 8
+    xr.testing.assert_identical(sequential["scen"].coords, parallel["scen"].coords)
+    xr.testing.assert_allclose(sequential["scen"], parallel["scen"])
+    xr.testing.assert_allclose(sequential["adj"].ds, parallel["adj"].ds)
+    assert sequential["evaluation"] is not None
+    pd.testing.assert_frame_equal(sequential["evaluation"], parallel["evaluation"])
+    if sequential["hist_eval"] is not None:
+        xr.testing.assert_allclose(sequential["hist_eval"], parallel["hist_eval"])
+
+
 @pytest.fixture
 def mock_grid(monkeypatch):
     """Seven cells make two parallel batches and a final sequential block."""
