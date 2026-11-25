@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import copy
 import importlib.util
 import pickle
+from dataclasses import replace
+from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
@@ -13,10 +16,13 @@ import xarray as xr
 import xsdba
 import xsdba.adjustment as xsdba_adj
 
+from bcflow import adjust
 from bcflow.cell import STACK_DIM, CellPlan, CellResult, PostStep, adjust_trained, run_cell
+from bcflow.config_schema import PostConfig, TargetConfig, load_config
 from bcflow.preprocess import SEED, ZeroHandling
 from bcflow.progress import RunCancelled, RunControl
 from bcflow.qa import QACheck
+from bcflow.resources import WorkerSelection
 from bcflow.variables import DEFAULTS, VariableSpec
 
 
@@ -817,3 +823,403 @@ def test_pickle_roundtrip_cell_plan_and_cell_result():
     assert res_rt.trained_obj is None
     assert res_rt.zeros is None
     assert res_rt.post_trained == ()
+
+
+@pytest.mark.parametrize(
+    ("method", "group", "plan_train", "plan_adjust"),
+    [
+        ("mbcn", "none", (("n_iter", 2), ("n_escore", -1)), ()),
+        ("principal_components", "month", (), ()),
+        ("npdf_transform", "month", (), (("n_iter", 2), ("n_escore", -1))),
+    ],
+)
+def test_precip_univariate_params_do_not_leak_into_multivariate_methods(
+    monkeypatch, method, group, plan_train, plan_adjust
+):
+    ref = _make_dataset(years=1, start="2000-01-01", seed=131)
+    hist = _make_dataset(years=1, start="2000-01-01", seed=132)
+    sim = _make_dataset(years=1, start="2030-01-01", seed=133)
+
+    leaky_precip = replace(
+        DEFAULTS["precip"],
+        train_params={"nquantiles": 33, "leaky_train_kw": "bad"},
+        adjust_params={
+            "interp": "nearest",
+            "extrapolation": "constant",
+            "leaky_adjust_kw": "bad",
+        },
+    )
+    specs = {"precip": leaky_precip, "tmax": DEFAULTS["tmax"]}
+
+    seen_train_kws: list[dict] = []
+    seen_adjust_kws: list[dict] = []
+
+    if method == "mbcn":
+        real_train = xsdba_adj.MBCn.train
+        real_adjust = xsdba_adj.MBCn.adjust
+
+        def spy_train(cls, ref_a, hist_a, **kw):
+            seen_train_kws.append(dict(kw))
+            return real_train(ref_a, hist_a, **kw)
+
+        def spy_adjust(self, sim_a, ref_a, hist_a, **kw):
+            seen_adjust_kws.append(dict(kw))
+            return real_adjust(self, sim_a, ref_a, hist_a, **kw)
+
+        monkeypatch.setattr(xsdba_adj.MBCn, "train", classmethod(spy_train))
+        monkeypatch.setattr(xsdba_adj.MBCn, "adjust", spy_adjust)
+    elif method == "principal_components":
+        real_train = xsdba_adj.PrincipalComponents.train
+        real_adjust = xsdba_adj.PrincipalComponents.adjust
+
+        def spy_train(cls, ref_a, hist_a, **kw):
+            seen_train_kws.append(dict(kw))
+            return real_train(ref_a, hist_a, **kw)
+
+        def spy_adjust(self, sim_a, **kw):
+            seen_adjust_kws.append(dict(kw))
+            return real_adjust(self, sim_a, **kw)
+
+        monkeypatch.setattr(
+            xsdba_adj.PrincipalComponents, "train", classmethod(spy_train)
+        )
+        monkeypatch.setattr(xsdba_adj.PrincipalComponents, "adjust", spy_adjust)
+    else:
+        real_adjust = xsdba_adj.NpdfTransform.adjust
+
+        def spy_adjust(cls, ref_a, hist_a, sim_a, **kw):
+            seen_adjust_kws.append(dict(kw))
+            return real_adjust(ref_a, hist_a, sim_a, **kw)
+
+        monkeypatch.setattr(xsdba_adj.NpdfTransform, "adjust", classmethod(spy_adjust))
+
+    plan = CellPlan(
+        target_name="precip_tmax",
+        variables=("precip", "tmax"),
+        method=method,
+        group=group,
+        train_params=plan_train,
+        adjust_params=plan_adjust,
+    )
+    res = run_cell(
+        plan,
+        ref=ref,
+        hist=hist,
+        sim=sim,
+        specs=specs,
+        units=_units("precip", "tmax"),
+    )
+    assert set(res.scen.data_vars) == {"precip", "tmax"}
+    for kw in seen_train_kws:
+        assert "nquantiles" not in kw
+        assert "leaky_train_kw" not in kw
+    for kw in seen_adjust_kws:
+        assert "interp" not in kw
+        assert "extrapolation" not in kw
+        assert "leaky_adjust_kw" not in kw
+    if method == "mbcn":
+        assert seen_adjust_kws[0]["base_kws_vars"] == {
+            "precip": {"kind": "*"},
+            "tmax": {"kind": "+"},
+        }
+    elif method == "principal_components":
+        assert seen_train_kws[0]["crd_dim"] == STACK_DIM
+
+
+def test_run_target_univariate_parity_stations_and_grid(
+    toy_config, grid_config, monkeypatch
+):
+    cfg_st = load_config(toy_config)
+    for target in cfg_st.resolved_targets():
+        v = target.variables[0]
+        qa_var: list[QACheck] = []
+        qa_tgt: list[QACheck] = []
+        res_var = adjust.run_variable(cfg_st, v, qa_var)
+        res_tgt = adjust.run_target(cfg_st, target, qa_tgt)[v]
+        xr.testing.assert_identical(res_var["scen"].coords, res_tgt["scen"].coords)
+        xr.testing.assert_equal(res_var["scen"], res_tgt["scen"])
+        assert res_var["scen"].attrs["units"] == res_tgt["scen"].attrs["units"]
+        xr.testing.assert_equal(res_var["adj"].ds, res_tgt["adj"].ds)
+        pd.testing.assert_frame_equal(res_var["evaluation"], res_tgt["evaluation"])
+        xr.testing.assert_equal(res_var["hist_eval"], res_tgt["hist_eval"])
+
+    open_reference = adjust.open_grid_reference
+    load_model = adjust.load_model_variable
+    monkeypatch.setattr(
+        adjust,
+        "open_grid_reference",
+        lambda *a, **kw: (
+            (ref := open_reference(*a, **kw))[0].sel(time=slice("2000", "2002")),
+            ref[1],
+            ref[2],
+        ),
+    )
+    monkeypatch.setattr(
+        adjust,
+        "load_model_variable",
+        lambda *a, **kw: load_model(*a, **kw).sel(time=slice("2000", "2002")),
+    )
+    raw_grid = copy.deepcopy(grid_config)
+    raw_grid["grid"].update(region={"lat": [15, 16], "lon": [105, 107]}, block_size=3)
+    raw_grid["periods"] = {"calibration": ["2000", "2001"], "validation": ["2002", "2002"]}
+    cfg_gr = load_config(raw_grid)
+    target_tmax = cfg_gr.resolved_targets()[0]
+    res_var_g = adjust.run_variable(cfg_gr, "tmax", [])
+    res_tgt_g = adjust.run_target(cfg_gr, target_tmax, [])["tmax"]
+    xr.testing.assert_identical(res_var_g["scen"].coords, res_tgt_g["scen"].coords)
+    xr.testing.assert_equal(res_var_g["scen"], res_tgt_g["scen"])
+    assert res_var_g["scen"].attrs["units"] == res_tgt_g["scen"].attrs["units"]
+    xr.testing.assert_equal(res_var_g["adj"].ds, res_tgt_g["adj"].ds)
+    pd.testing.assert_frame_equal(res_var_g["evaluation"], res_tgt_g["evaluation"])
+    xr.testing.assert_equal(res_var_g["hist_eval"], res_tgt_g["hist_eval"])
+
+
+def test_run_target_early_method_validation_before_loading(toy_config, monkeypatch):
+    def _boom(*args, **kwargs):
+        raise AssertionError("No loader should run when target method check fails")
+
+    monkeypatch.setattr(adjust, "load_station_variable", _boom)
+    monkeypatch.setattr(adjust, "open_grid_reference", _boom)
+    cfg = load_config(toy_config)
+
+    bad_targets = [
+        (TargetConfig(name="t_unk", variables=["tmax", "precip"], method="nope"), "method:t_unk:unknown"),
+        (TargetConfig(name="t_post", variables=["tmax"], method="extreme_values"), "method:t_post:invalid_family"),
+        (TargetConfig(name="t_arity", variables=["tmax"], method="mbcn", group="none"), "method:t_arity:min_vars"),
+        (TargetConfig(name="t_uni", variables=["tmax", "precip"], method="scaling"), "method:t_uni:univariate_only"),
+        (
+            TargetConfig(
+                name="t_bad_post",
+                variables=["tmax", "precip"],
+                method="principal_components",
+                post=[PostConfig(method="scaling")],
+            ),
+            "post:t_bad_post:invalid_family",
+        ),
+    ]
+    for target, expected_qa in bad_targets:
+        qa: list[QACheck] = []
+        with pytest.raises(ValueError):
+            adjust.run_target(cfg, target, qa)
+        assert any(c.name == expected_qa and c.status == "fail" for c in qa)
+
+    real_find_spec = importlib.util.find_spec
+    monkeypatch.setattr(
+        importlib.util,
+        "find_spec",
+        lambda mod: object() if mod == "ot" else real_find_spec(mod),
+    )
+    qa_otc: list[QACheck] = []
+    with pytest.raises(ValueError, match="does not support projection"):
+        adjust.run_target(
+            cfg,
+            TargetConfig(name="t_otc", variables=["tmax", "precip"], method="otc", group="none"),
+            qa_otc,
+        )
+    assert any(c.name == "method:t_otc:no_projection" and c.status == "fail" for c in qa_otc)
+
+
+def test_run_target_multivariate_stations_and_intersection(toy_config):
+    cfg_dict = copy.deepcopy(toy_config)
+    cfg_dict.pop("correction", None)
+    cfg_dict["targets"] = [
+        {
+            "name": "joint",
+            "variables": ["tmax", "precip"],
+            "method": "principal_components",
+            "group": "month",
+        }
+    ]
+    cfg = load_config(cfg_dict)
+    target = cfg.resolved_targets()[0]
+    qa: list[QACheck] = []
+    out = adjust.run_target(cfg, target, qa)
+    assert set(out) == {"tmax", "precip"}
+    assert not any(c.status == "fail" for c in qa)
+    assert out["tmax"]["adj"] is out["precip"]["adj"]
+    assert float(out["precip"]["scen"].min()) >= 0.0
+    assert out["tmax"]["evaluation"] is not None
+
+    # Drop precip column from one station -> warn & continue on common stations.
+    st2 = Path(cfg_dict["stations"]["data_dir"]) / "ST02.csv"
+    pd.read_csv(st2).drop(columns=["precip"]).to_csv(st2, index=False)
+    qa_drop: list[QACheck] = []
+    out_drop = adjust.run_target(cfg, target, qa_drop)
+    warn = next(c for c in qa_drop if c.name == "target:joint:station_intersection")
+    assert warn.status == "warn"
+    assert warn.context["dropped_stations"] == ["ST02"]
+    assert out_drop["tmax"]["scen"].sizes["station"] < out["tmax"]["scen"].sizes["station"]
+
+    # Drop precip from ST01 and tmax from ST03 -> 0 common stations -> fail cleanly.
+    st1 = Path(cfg_dict["stations"]["data_dir"]) / "ST01.csv"
+    st3 = Path(cfg_dict["stations"]["data_dir"]) / "ST03.csv"
+    pd.read_csv(st1).drop(columns=["precip"]).to_csv(st1, index=False)
+    pd.read_csv(st3).drop(columns=["tmax"]).to_csv(st3, index=False)
+    qa_empty: list[QACheck] = []
+    with pytest.raises(ValueError, match="0 common stations"):
+        adjust.run_target(cfg, target, qa_empty)
+    assert any(
+        c.name == "target:joint:station_intersection" and c.status == "fail"
+        for c in qa_empty
+    )
+
+
+def test_run_target_multivariate_grid_parallel_matches_sequential_and_ipc_safe(
+    grid_config, monkeypatch
+):
+    raw = copy.deepcopy(grid_config)
+    raw.pop("correction", None)
+    raw["grid"].update(region={"lat": [15, 16], "lon": [105, 107]}, block_size=3)
+    raw["periods"] = {"calibration": ["2000", "2001"], "validation": ["2002", "2002"]}
+    raw["targets"] = [
+        {
+            "name": "joint",
+            "variables": ["tmax", "precip"],
+            "method": "principal_components",
+            "group": "month",
+        }
+    ]
+
+    open_reference = adjust.open_grid_reference
+    load_model = adjust.load_model_variable
+
+    def short_reference(*args, **kwargs):
+        ref, lat, lon = open_reference(*args, **kwargs)
+        return ref.sel(time=slice("2000", "2002")), lat, lon
+
+    def short_model(*args, **kwargs):
+        return load_model(*args, **kwargs).sel(time=slice("2000", "2002"))
+
+    def select(requested, fraction, remaining, estimated):
+        budget = remaining * estimated
+        return WorkerSelection(
+            workers=min(requested, remaining),
+            cpu_limit=8,
+            memory_limit=remaining,
+            available_bytes=budget * 2,
+            budget_bytes=budget,
+            estimated_task_bytes=estimated,
+            over_budget=False,
+        )
+
+    monkeypatch.setattr(adjust, "open_grid_reference", short_reference)
+    monkeypatch.setattr(adjust, "load_model_variable", short_model)
+    monkeypatch.setattr(adjust, "select_workers", select)
+
+    regrid_methods: dict[str, set[str]] = {"tmax": set(), "precip": set()}
+    orig_regrid = adjust.regrid_to_points
+
+    def spy_regrid(da, target, qa, **kwargs):
+        var = kwargs["source_label"].split(":")[0]
+        regrid_methods[var].add(kwargs["method"])
+        return orig_regrid(da, target, qa, **kwargs)
+
+    monkeypatch.setattr(adjust, "regrid_to_points", spy_regrid)
+
+    outputs = []
+    qas = []
+    for workers in (1, 2):
+        raw["grid"]["workers"] = workers
+        cfg = load_config(raw)
+        target = cfg.resolved_targets()[0]
+        qa: list[QACheck] = []
+        outputs.append(adjust.run_target(cfg, target, qa))
+        qas.append(qa)
+
+    assert regrid_methods["precip"] == {"conservative"}
+    assert regrid_methods["tmax"] == {"bilinear"}
+
+    seq, par = outputs
+    assert not [c for c in qas[0] if c.status == "fail"]
+    assert not [c for c in qas[1] if c.status == "fail"]
+    # precip has bounds (0.0, None) -> 1 aggregated bounds check; tmax has (None, None) -> 0.
+    assert sum(c.name.startswith("bounds:precip:") for c in qas[1]) == 1
+    assert sum(c.name.startswith("bounds:tmax:") for c in qas[1]) == 0
+    for v in ("tmax", "precip"):
+        xr.testing.assert_identical(seq[v]["scen"].coords, par[v]["scen"].coords)
+        xr.testing.assert_allclose(seq[v]["scen"], par[v]["scen"])
+        xr.testing.assert_allclose(seq[v]["adj"].ds, par[v]["adj"].ds)
+        pd.testing.assert_frame_equal(seq[v]["evaluation"], par[v]["evaluation"])
+        xr.testing.assert_allclose(seq[v]["hist_eval"], par[v]["hist_eval"])
+
+    # Verify _correct_target_block_task strips live TrainAdjust/ZeroHandling/post_trained.
+    ds = _make_dataset(years=1, start="2000-01-01", seed=141)
+    cfg = load_config(raw)
+    target = cfg.resolved_targets()[0]
+    specs = {v: cfg.spec(v) for v in target.variables}
+    plan = adjust._build_target_plan(target, specs)
+    part, _ = adjust._correct_target_block_task(
+        cfg,
+        target,
+        specs,
+        {"tmax": ds["tmax"], "precip": ds["precip"]},
+        {"tmax": ds["tmax"], "precip": ds["precip"]},
+        {"tmax": ds["tmax"], "precip": ds["precip"]},
+        [],
+        plan,
+    )
+    assert isinstance(part["adj"], adjust._CombinedAdjustment)
+    assert "zeros" not in part and "post_trained" not in part
+    pickle.loads(pickle.dumps(part))
+
+
+def test_run_target_grid_memory_estimate_uses_max_time_steps(grid_config, monkeypatch):
+    raw = copy.deepcopy(grid_config)
+    raw.pop("correction", None)
+    raw["grid"].update(region={"lat": [15, 16], "lon": [105, 107]}, block_size=3, workers=1)
+    raw["periods"] = {"calibration": ["2000", "2001"], "validation": None}
+    raw["targets"] = [
+        {
+            "name": "joint",
+            "variables": ["tmax", "precip"],
+            "method": "principal_components",
+            "group": "month",
+        }
+    ]
+    open_reference = adjust.open_grid_reference
+    load_model = adjust.load_model_variable
+    lengths: dict[tuple[str, str], int] = {}
+
+    def varied_reference(grid_cfg, variable, qa):
+        ref, lat, lon = open_reference(grid_cfg, variable, qa)
+        end = "2002" if variable == "tmax" else "2001"
+        sliced = ref.sel(time=slice("2000", end))
+        lengths[("ref", variable)] = sliced.sizes["time"]
+        return sliced, lat, lon
+
+    def varied_model(model_cfg, kind, variable, qa):
+        da = load_model(model_cfg, kind, variable, qa)
+        end = "2002" if variable == "tmax" else "2001"
+        sliced = da.sel(time=slice("2000", end))
+        lengths[(kind, variable)] = sliced.sizes["time"]
+        return sliced
+
+    seen_steps: list[tuple[int, int, int, int, float]] = []
+    real_estimate = adjust.estimate_task_bytes
+
+    def spy_estimate(ref_steps, hist_steps, sim_steps, cells, **kwargs):
+        seen_steps.append(
+            (ref_steps, hist_steps, sim_steps, kwargs["n_vars"], kwargs["method_factor"])
+        )
+        return real_estimate(ref_steps, hist_steps, sim_steps, cells, **kwargs)
+
+    monkeypatch.setattr(adjust, "open_grid_reference", varied_reference)
+    monkeypatch.setattr(adjust, "load_model_variable", varied_model)
+    monkeypatch.setattr(adjust, "estimate_task_bytes", spy_estimate)
+
+    cfg = load_config(raw)
+    target = cfg.resolved_targets()[0]
+    qa: list[QACheck] = []
+    adjust.run_target(cfg, target, qa)
+
+    assert seen_steps
+    assert lengths[("ref", "tmax")] > lengths[("ref", "precip")]
+    expected_ref = max(lengths[("ref", "tmax")], lengths[("ref", "precip")])
+    expected_hist = max(lengths[("hist", "tmax")], lengths[("hist", "precip")])
+    expected_sim = max(lengths[("sim", "tmax")], lengths[("sim", "precip")])
+    assert all(
+        r == expected_ref and h == expected_hist and s == expected_sim
+        for r, h, s, _, _ in seen_steps
+    )
+    assert all(n == 2 and f == 1.5 for _, _, _, n, f in seen_steps)
+

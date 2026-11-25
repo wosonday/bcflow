@@ -8,7 +8,7 @@ from typing import get_args
 import pytest
 from pydantic import ValidationError
 
-from bcflow.config_schema import VariableName, load_config
+from bcflow.config_schema import TargetConfig, VariableName, load_config
 from bcflow.discovery import get_method_meta
 from bcflow.variables import DEFAULTS, VARIABLES, VariableSpec, resolve, resolve_method_params
 
@@ -289,3 +289,125 @@ def test_config_schema_does_not_import_xsdba():
         check=True,
         env=env,
     )
+
+
+def test_target_config_valid_univariate_and_multivariate(toy_config):
+    uni = TargetConfig(
+        name="tmax_uni",
+        variables=["tmax"],
+        method="quantile_delta_mapping",
+        group="month",
+        window=1,
+    )
+    assert uni.variables == ["tmax"]
+
+    multi = TargetConfig(
+        name="joint",
+        variables=["tmax", "precip"],
+        method="mbcn",
+        group="none",
+        pool_dims=["station"],
+        train_params={"n_iter": 5},
+    )
+    assert multi.group == "none" and multi.pool_dims == ["station"]
+
+    raw = copy.deepcopy(toy_config)
+    raw["targets"] = [multi.model_dump()]
+    cfg = load_config(raw)
+    assert cfg.targets is not None
+    assert cfg.resolved_targets() == cfg.targets
+
+
+def test_resolved_targets_derives_univariate_defaults_when_omitted(toy_config):
+    raw = copy.deepcopy(toy_config)
+    raw["correction"]["tmax"]["pool_dims"] = ["station"]
+    raw["correction"]["precip"]["post"] = [
+        {"method": "extreme_values", "train_params": {"cluster_thresh": "10 mm d-1"}}
+    ]
+    cfg = load_config(raw)
+    targets = cfg.resolved_targets()
+    assert [t.name for t in targets] == ["tmax", "precip"]
+
+    tmax_t, precip_t = targets
+    assert tmax_t.variables == ["tmax"]
+    assert tmax_t.method == "empirical_quantile_mapping"
+    assert tmax_t.group == "dayofyear"
+    assert tmax_t.window == 15
+    assert tmax_t.pool_dims == ["station"]
+    assert tmax_t.train_params == {"nquantiles": 15}
+    assert tmax_t.adjust_params == {}
+    assert tmax_t.post == []
+
+    assert precip_t.variables == ["precip"]
+    assert precip_t.method == "empirical_quantile_mapping"
+    assert precip_t.group == "none"
+    assert precip_t.window == 1
+    assert precip_t.train_params == {"nquantiles": 15}
+    assert precip_t.adjust_params == {"interp": "linear", "extrapolation": "constant"}
+    assert len(precip_t.post) == 1 and precip_t.post[0].method == "extreme_values"
+
+    # Without explicit correction.precip.adjust_params, derived TargetConfig leaves it empty.
+    raw_defaults = copy.deepcopy(toy_config)
+    del raw_defaults["correction"]
+    default_precip = load_config(raw_defaults).resolved_targets()[1]
+    assert default_precip.train_params == {}
+    assert default_precip.adjust_params == {}
+
+
+def test_target_config_rejections(toy_config):
+    with pytest.raises(ValidationError, match="empty or whitespace"):
+        TargetConfig(name="   ", variables=["tmax"])
+
+    with pytest.raises(ValidationError, match="more than once"):
+        TargetConfig(name="dup", variables=["tmax", "tmax"])
+
+    with pytest.raises(ValidationError, match="window > 1"):
+        TargetConfig(name="bad_win", variables=["tmax"], group="none", window=5)
+
+    for grp in ("month", "dayofyear", "season"):
+        with pytest.raises(ValidationError, match="mbcn"):
+            TargetConfig(
+                name="joint",
+                variables=["tmax", "precip"],
+                method="mbcn",
+                group=grp,
+            )
+
+    with pytest.raises(ValidationError):
+        TargetConfig(name="extra", variables=["tmax"], unknown_key=1)
+
+
+def test_pipeline_targets_partition_validation(toy_config):
+    bad_empty = copy.deepcopy(toy_config)
+    bad_empty["targets"] = []
+    with pytest.raises(ValidationError, match="must not be empty"):
+        load_config(bad_empty)
+
+    bad_dup_name = copy.deepcopy(toy_config)
+    bad_dup_name["targets"] = [
+        {"name": "same", "variables": ["tmax"]},
+        {"name": "same", "variables": ["precip"]},
+    ]
+    with pytest.raises(ValidationError, match="duplicate target name"):
+        load_config(bad_dup_name)
+
+    bad_unknown = copy.deepcopy(toy_config)
+    bad_unknown["targets"] = [
+        {"name": "t1", "variables": ["tmax", "tmin"]},
+        {"name": "t2", "variables": ["precip"]},
+    ]
+    with pytest.raises(ValidationError, match="not in variables"):
+        load_config(bad_unknown)
+
+    bad_overlap = copy.deepcopy(toy_config)
+    bad_overlap["targets"] = [
+        {"name": "t1", "variables": ["tmax", "precip"]},
+        {"name": "t2", "variables": ["precip"]},
+    ]
+    with pytest.raises(ValidationError, match="more than one target"):
+        load_config(bad_overlap)
+
+    bad_uncovered = copy.deepcopy(toy_config)
+    bad_uncovered["targets"] = [{"name": "t1", "variables": ["tmax"]}]
+    with pytest.raises(ValidationError, match="not covered"):
+        load_config(bad_uncovered)

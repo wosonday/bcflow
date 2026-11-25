@@ -150,6 +150,41 @@ class PostConfig(BaseModel):
     adjust_params: dict[str, Any] = Field(default_factory=dict)
 
 
+class TargetConfig(BaseModel):
+    """Correction unit covering one (univariate) or several (multivariate) variables."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str
+    variables: list[str] = Field(min_length=1)
+    method: str = "quantile_delta_mapping"
+    group: Literal["dayofyear", "month", "season", "none"] = "month"
+    window: int = Field(default=1, ge=1)
+    pool_dims: list[str] = Field(default_factory=list)
+    train_params: dict[str, Any] = Field(default_factory=dict)
+    adjust_params: dict[str, Any] = Field(default_factory=dict)
+    post: list[PostConfig] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _validate_target(self) -> TargetConfig:
+        if not self.name.strip():
+            raise ValueError("target name must not be empty or whitespace.")
+        duplicated = sorted({v for v in self.variables if self.variables.count(v) > 1})
+        if duplicated:
+            raise ValueError(
+                f"target {self.name!r}: variables listed more than once: {duplicated}."
+            )
+        if self.window > 1 and self.group == "none":
+            raise ValueError(
+                "window > 1 cannot be used with group='none' (single whole-year group)."
+            )
+        if self.method == "mbcn" and self.group != "none":
+            raise ValueError(
+                "method 'mbcn' requires group='none' (MBCn does not support grouped adjustment)."
+            )
+        return self
+
+
 class CustomVariableConfig(BaseModel):
     """Schema for a user-defined variable outside the built-in VARIABLES."""
 
@@ -291,6 +326,7 @@ class PipelineConfig(BaseModel):
     model: ModelConfig
     periods: PeriodsConfig = Field(default_factory=PeriodsConfig)
     correction: dict[str, CorrectionConfig] = Field(default_factory=dict)
+    targets: list[TargetConfig] | None = None
     output: OutputConfig = Field(default_factory=OutputConfig)
 
     @model_validator(mode="after")
@@ -365,7 +401,71 @@ class PipelineConfig(BaseModel):
                 raise ValueError(
                     f"correction.{v}: window > 1 cannot be used with group='none'."
                 )
+        if self.targets is not None:
+            if not self.targets:
+                raise ValueError(
+                    "targets: must not be empty when provided; omit 'targets' to use per-variable defaults."
+                )
+            target_names = [t.name for t in self.targets]
+            dup_names = sorted({n for n in target_names if target_names.count(n) > 1})
+            if dup_names:
+                raise ValueError(f"targets: duplicate target name(s): {dup_names}.")
+            declared = set(self.variables)
+            unknown_target_vars = sorted(
+                {v for t in self.targets for v in t.variables if v not in declared}
+            )
+            if unknown_target_vars:
+                raise ValueError(
+                    f"targets: variable(s) {unknown_target_vars} are not in variables {self.variables}."
+                )
+            seen_vars: set[str] = set()
+            overlapping: set[str] = set()
+            for target in self.targets:
+                for v in target.variables:
+                    if v in seen_vars:
+                        overlapping.add(v)
+                    seen_vars.add(v)
+            if overlapping:
+                raise ValueError(
+                    f"targets: variable(s) {sorted(overlapping)} appear in more than one target."
+                )
+            missing_target_vars = [v for v in self.variables if v not in seen_vars]
+            if missing_target_vars:
+                raise ValueError(
+                    f"targets: variable(s) {missing_target_vars} in variables are not covered by any target."
+                )
         return self
+
+    def resolved_targets(self) -> list[TargetConfig]:
+        """Return configured targets, or derive one univariate target per variable."""
+        if self.targets is not None:
+            return list(self.targets)
+        resolved: list[TargetConfig] = []
+        for v in self.variables:
+            spec = self.spec(v)
+            override = self.correction.get(v)
+            resolved.append(
+                TargetConfig(
+                    name=v,
+                    variables=[v],
+                    method=spec.method,
+                    group=spec.group,  # type: ignore[arg-type]
+                    window=spec.window,
+                    pool_dims=list(override.pool_dims) if override else [],
+                    train_params=(
+                        dict(override.train_params)
+                        if override and override.train_params is not None
+                        else {}
+                    ),
+                    adjust_params=(
+                        dict(override.adjust_params)
+                        if override and override.adjust_params is not None
+                        else {}
+                    ),
+                    post=list(override.post) if override else [],
+                )
+            )
+        return resolved
 
     def spec(self, variable: str) -> VariableSpec:
         """Defaults of `variable` merged with its `correction:` overrides."""

@@ -125,11 +125,13 @@ def test_two_process_grid_with_post_matches_sequential(grid_config, monkeypatch)
     monkeypatch.setattr(adjust, "load_model_variable", short_model)
     monkeypatch.setattr(adjust, "select_workers", select)
     outputs = []
+    event_lists = []
     for workers in (1, 2):
         raw["grid"]["workers"] = workers
+        events = []
         qa = []
         result = adjust.run_variable(
-            load_config(raw), "precip", qa, control=RunControl(lambda e: None)
+            load_config(raw), "precip", qa, control=RunControl(events.append)
         )
         assert not [check.message for check in qa if check.status == "fail"]
         assert any(
@@ -137,9 +139,16 @@ def test_two_process_grid_with_post_matches_sequential(grid_config, monkeypatch)
             for check in qa
         )
         outputs.append(result)
+        event_lists.append(events)
 
     sequential, parallel = outputs
     assert sequential["grid"].size == parallel["grid"].size == 8
+    for events in event_lists:
+        starts = [e for e in events if e.get("stage") == "block_started"]
+        assert [e["block_cells"] for e in starts] == [3, 3, 2]
+    assert [
+        e["workers"] for e in event_lists[1] if e.get("stage") == "worker_selection"
+    ] == [2, 1]
     xr.testing.assert_identical(sequential["scen"].coords, parallel["scen"].coords)
     xr.testing.assert_allclose(sequential["scen"], parallel["scen"])
     xr.testing.assert_allclose(sequential["adj"].ds, parallel["adj"].ds)

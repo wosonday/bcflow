@@ -201,13 +201,19 @@ def _fill_registry_defaults(
     emit_sample_size_qa: bool = True,
 ) -> tuple[dict[str, Any], dict[str, Any], Grouper]:
     """Step 3: resolve params, inject registry_defaults, build Grouper, and emit sample-size QA."""
-    primary_spec = specs[plan.variables[0]]
-    train_kws, adjust_kws = resolve_method_params(
-        primary_spec,
-        method.meta,
-        explicit_train=dict(plan.train_params),
-        explicit_adjust=dict(plan.adjust_params),
-    )
+    if method.min_vars > 1:
+        # Never leak univariate VariableSpec defaults (e.g. precip's interp/nquantiles)
+        # into multivariate methods such as mbcn, principal_components, or npdf_transform.
+        train_kws = {**dict(method.default_train_params), **dict(plan.train_params)}
+        adjust_kws = {**dict(method.default_adjust_params), **dict(plan.adjust_params)}
+    else:
+        primary_spec = specs[plan.variables[0]]
+        train_kws, adjust_kws = resolve_method_params(
+            primary_spec,
+            method.meta,
+            explicit_train=dict(plan.train_params),
+            explicit_adjust=dict(plan.adjust_params),
+        )
     _inject_registry_defaults(method, plan.variables, specs, train_kws, adjust_kws)
 
     grouper = build_grouper(plan.group, window=plan.window, pool_dims=plan.pool_dims)
