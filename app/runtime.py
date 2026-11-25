@@ -2,14 +2,25 @@
 
 from __future__ import annotations
 
-import json
-from datetime import date, datetime
 from pathlib import Path
 
 import streamlit as st
 
-from app.services.config import config_digest, resolve_document
+from app.services.config import normalize_config_for_json, resolve_document
 from app.services.runner import JobManager
+
+
+class SessionKeys:
+    """Session_state and widget keys shared across multiple sites."""
+
+    DOCUMENT = "document"
+    EDITOR_BUFFER = "editor_buffer"
+    CONFIG_PATH = "config_path"
+    TRACKED_JOB_ID = "tracked_job_id"
+    EXAMPLE_CONFIG = "example_config"
+    CONFIG_EDITOR = "config_editor"
+    MONITOR_TRACKING = "_monitor_tracking"
+    JOB_CHOICE = "job_choice"
 
 
 @st.cache_resource(max_entries=1)
@@ -19,41 +30,37 @@ def get_manager() -> JobManager:
 
 
 def init_session() -> None:
-    defaults = {
-        "document": None,
-        "editor_buffer": "",
-        "config_path": "configs/example_toy.yaml",
-        "tracked_job_id": None,
-    }
-    for key, value in defaults.items():
+    for key, value in {
+        SessionKeys.DOCUMENT: None,
+        SessionKeys.EDITOR_BUFFER: "",
+        SessionKeys.CONFIG_PATH: "configs/example_toy.yaml",
+        SessionKeys.TRACKED_JOB_ID: None,
+    }.items():
         st.session_state.setdefault(key, value)
 
 
-def _json_date(value):
-    if isinstance(value, (date, datetime)):
-        return value.isoformat()
-    raise TypeError(f"Unsupported config value: {type(value).__name__}")
-
-
-def current_config() -> tuple[dict | None, str | None]:
-    """Parse the editor, preserving its original base directory across snapshots."""
-    document = st.session_state.get("document")
+def current_config_with_digest() -> tuple[dict | None, str, str | None]:
+    """Parse the editor, returning ``(normalized_config, digest, error)``."""
+    document = st.session_state.get(SessionKeys.DOCUMENT)
     if document is None:
-        return None, None
+        return None, "", None
     try:
         resolved = resolve_document(
-            st.session_state.get("editor_buffer", document["text"]),
+            st.session_state.get(SessionKeys.EDITOR_BUFFER, document["text"]),
             document["format"],
             document["base_dir"],
         )
         # YAML dates are accepted by the backend but need ISO text for JSON IPC.
-        normalized = json.loads(
-            json.dumps(resolved, default=_json_date, allow_nan=False)
-        )
-        config_digest(normalized)
-        return normalized, None
+        normalized, digest = normalize_config_for_json(resolved)
+        return normalized, digest, None
     except (ValueError, TypeError, OSError, RecursionError) as exc:
-        return None, str(exc)
+        return None, "", str(exc)
+
+
+def current_config() -> tuple[dict | None, str | None]:
+    """Parse the editor, preserving its original base directory across snapshots."""
+    config, _digest, error = current_config_with_digest()
+    return config, error
 
 
 def active_job() -> dict | None:
@@ -65,9 +72,7 @@ def matching_validation(digest: str) -> dict | None:
         (
             job
             for job in get_manager().history()
-            if job["kind"] == "validate"
-            and job["config_digest"] == digest
-            and not job["active"]
+            if job["kind"] == "validate" and job["config_digest"] == digest and not job["active"]
         ),
         None,
     )

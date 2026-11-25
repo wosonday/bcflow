@@ -487,3 +487,26 @@ def test_monitor_warns_when_final_response_is_missing(manager):
     assert any("usable final response" in item.value for item in app.warning)
     assert any(item.value == "No final JSON response" for item in app.code)
     assert not app.success
+
+
+def test_monitor_idle_calls_history_once_and_relative_load_uses_manager_cwd(
+    manager, config_path, monkeypatch
+):
+    calls = 0
+    original_history = manager.history
+
+    def counted_history():
+        nonlocal calls
+        calls += 1
+        return original_history()
+
+    monkeypatch.setattr(manager, "history", counted_history)
+    _app().switch_page("app_pages/monitor.py").run()
+    assert calls == 1
+
+    # Relative config path resolves against manager.cwd even if cwd differs.
+    other_cwd = config_path.parent.parent / "elsewhere"
+    other_cwd.mkdir()
+    monkeypatch.chdir(other_cwd)
+    app = _open(_app(), Path("configs") / config_path.name)
+    assert app.session_state["document"]["path"] == str(config_path)

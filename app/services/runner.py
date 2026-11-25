@@ -24,6 +24,8 @@ from pathlib import Path
 
 import psutil
 
+from app.services._io import atomic_write_text, dump_json_strict, resolve_local_path
+
 _EVENT_LIMIT = 500
 _LOG_LIMIT = 128 * 1024
 _LINE_LIMIT = 8 * 1024 * 1024
@@ -98,14 +100,13 @@ class JobManager:
             if kind == "inspect":
                 if input_path is None:
                     raise ValueError("inspect requires input_path")
-                path = Path(input_path)
-                target = str((self.root / path).resolve())
+                target = str(resolve_local_path(input_path, self.root, resolve=True))
                 config_text = None
             else:
                 if not isinstance(config, dict):
                     raise ValueError(f"{kind} requires a config dictionary")
                 # Serialize now: caller mutations after start cannot change this input.
-                config_text = json.dumps(config, ensure_ascii=True, allow_nan=False)
+                config_text = dump_json_strict(config)
 
             job_id = uuid.uuid4().hex
             directory = self.root / "outputs" / ".web-jobs" / job_id
@@ -134,6 +135,7 @@ class JobManager:
                     "summary": None,
                     "error": None,
                     "progress": None,
+                    "cell_progress": None,
                     "job_dir": str(directory),
                 },
                 command=command,
@@ -219,9 +221,12 @@ class JobManager:
         }
         metadata["elapsed_seconds"] = (job.finished or time.monotonic()) - job.started
         directory = Path(job.state["job_dir"])
-        temporary = directory / "status.tmp"
-        temporary.write_text(json.dumps(metadata, indent=2), encoding="utf-8")
-        temporary.replace(directory / "status.json")
+        atomic_write_text(
+            directory / "status.json",
+            dump_json_strict(metadata, indent=2),
+            overwrite=True,
+            fsync=False,
+        )
 
     def _log(self, job: _Job, data: bytes) -> None:
         with self._lock:
@@ -273,6 +278,8 @@ class JobManager:
             job.events.append(event)
             if event["event"] == "progress":
                 job.state["progress"] = event
+                if "total_cells" in event:
+                    job.state["cell_progress"] = event
             if event["event"] == "run_finished":
                 job.state["summary"] = event
 
@@ -504,3 +511,22 @@ class JobManager:
             self._persist(job)
         except OSError as exc:
             job.state.update(status="error", error=f"Cannot persist job status: {exc}")
+
+
+def latest_cell_progress(job: dict, variable: str | None = None) -> dict | None:
+    """Return the latest cell-progress event for ``variable`` if available."""
+    if variable is None:
+        variable = (job.get("progress") or {}).get("variable")
+    cached = job.get("cell_progress")
+    if isinstance(cached, dict) and "total_cells" in cached and cached.get("variable") == variable:
+        return cached
+    return next(
+        (
+            event
+            for event in reversed(job.get("events", []))
+            if event.get("event") == "progress"
+            and "total_cells" in event
+            and event.get("variable") == variable
+        ),
+        None,
+    )

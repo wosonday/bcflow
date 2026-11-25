@@ -429,3 +429,30 @@ def test_actual_backend_toy_run(toy_config, tmp_path):
         assert json.loads(Path(state["config_path"]).read_text()) == config
     finally:
         manager.close()
+
+
+def test_latest_cell_progress_uses_cached_state_or_events_fallback():
+    cached = {
+        "event": "progress",
+        "variable": "tmax",
+        "completed_cells": 4,
+        "total_cells": 10,
+    }
+    job = {"progress": {"variable": "tmax"}, "cell_progress": cached, "events": []}
+    assert runner.latest_cell_progress(job) == cached
+
+    fallback_event = {
+        "event": "progress",
+        "variable": "tmax",
+        "completed_cells": 5,
+        "total_cells": 10,
+    }
+    fallback_job = {
+        "progress": {"variable": "tmax"},
+        "events": [
+            {"event": "progress", "variable": "precip", "total_cells": 20},
+            fallback_event,
+        ],
+    }
+    assert runner.latest_cell_progress(fallback_job) == fallback_event
+    assert runner.latest_cell_progress({"progress": {"variable": "tmax"}, "events": []}) is None

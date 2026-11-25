@@ -5,27 +5,23 @@ from __future__ import annotations
 import heapq
 import json
 import os
-import stat
 from pathlib import Path, PureWindowsPath
 
 import pandas as pd
 
-_MAX_JSON_BYTES = 8 * 1024 * 1024
+from app.services._io import MAX_JSON_BYTES, read_bounded_bytes, resolve_local_path
+
+_METRIC_UNITS = {
+    "sd_ratio": "dimensionless ratio",
+    "wet_day_freq_diff": "fraction",
+}
 
 
 def _read_json(path: Path):
+    raw = read_bounded_bytes(path, MAX_JSON_BYTES, label="JSON artifact")
     try:
-        info = path.stat()
-        if not stat.S_ISREG(info.st_mode):
-            raise ValueError(f"JSON artifact is not a regular file: {path}")
-        if info.st_size > _MAX_JSON_BYTES:
-            raise ValueError(f"JSON artifact exceeds the 8 MiB size limit: {path}")
-        with path.open("rb") as stream:
-            raw = stream.read(_MAX_JSON_BYTES + 1)
-        if len(raw) > _MAX_JSON_BYTES:
-            raise ValueError(f"JSON artifact exceeds the 8 MiB size limit: {path}")
         return json.loads(raw.decode("utf-8"))
-    except (OSError, UnicodeError, json.JSONDecodeError, RecursionError) as exc:
+    except (UnicodeError, json.JSONDecodeError, RecursionError) as exc:
         raise ValueError(f"Cannot read JSON artifact {path}: {exc}") from exc
 
 
@@ -214,3 +210,95 @@ def read_evaluation(
         data["improved"] = values.map({"true": True, "false": False}).astype("boolean")
     data.attrs["truncated"] = truncated
     return data
+
+
+def latest_manifest(history: list[dict], cwd: str | Path) -> str | None:
+    """Return the local manifest path from the newest finished run job."""
+    for job in history:
+        summary = job.get("summary")
+        if (
+            job.get("kind") != "run"
+            or job.get("active")
+            or not isinstance(summary, dict)
+        ):
+            continue
+        path = summary.get("manifest")
+        if isinstance(path, str) and path:
+            return str(resolve_local_path(path, cwd))
+    return None
+
+
+def qa_checks_frame(checks: list[dict]) -> pd.DataFrame:
+    """Normalize QA check records into a flat display DataFrame."""
+    rows = []
+    for check in checks:
+        context = check.get("context")
+        context = context if isinstance(context, dict) else {}
+        rows.append(
+            {
+                "Status": str(check.get("status", "unknown")),
+                "Variable": str(context.get("variable") or "Run"),
+                "Check": str(check.get("name", "")),
+                "Message": str(check.get("message", "")),
+                "Context": json.dumps(context, ensure_ascii=False),
+            }
+        )
+    return pd.DataFrame(
+        rows, columns=["Status", "Variable", "Check", "Message", "Context"]
+    )
+
+
+def finite_values(data: pd.DataFrame) -> pd.DataFrame:
+    """Return a copy with +/-inf in numeric columns replaced by NaN."""
+    cleaned = data.copy()
+    columns = cleaned.select_dtypes(include="number").columns
+    cleaned[columns] = cleaned[columns].replace(
+        [float("inf"), -float("inf")], float("nan")
+    )
+    return cleaned
+
+
+def chart_data(data: pd.DataFrame) -> pd.DataFrame:
+    """Select up to 100 unique locations with Raw and Corrected series."""
+    chart = data.loc[:, ["raw", "corrected"]].copy()
+    if {"lat", "lon"}.issubset(data.columns):
+        chart["Location"] = data["lat"].astype(str) + ", " + data["lon"].astype(str)
+    else:
+        chart["Location"] = data["station"].astype(str)
+    chart = chart.drop_duplicates(["Location"], keep="first").iloc[:100]
+    return chart.rename(columns={"raw": "Raw", "corrected": "Corrected"})
+
+
+def metric_label(metric: str, record: dict, data: pd.DataFrame) -> str:
+    """Format an evaluation metric axis label with its units."""
+    units = _METRIC_UNITS.get(metric)
+    if units is None:
+        units = record.get("units")
+        if not isinstance(units, str) or not units.strip():
+            recorded = data["units"].dropna().unique() if "units" in data else []
+            units = (
+                str(recorded[0])
+                if len(recorded) == 1
+                else "variable units, not recorded"
+            )
+    return f"{metric.replace('_', ' ')} ({units})"
+
+
+def declared_artifacts(manifest: dict) -> list[tuple[str, str]]:
+    """Flatten declared artifact labels and relative paths from a manifest."""
+    declared: list[tuple[str, str]] = []
+    for key in ("qa", "config"):
+        if manifest.get(key) is not None:
+            declared.append((key, manifest[key]))
+    for name, record in manifest["variables"].items():
+        for key in ("evaluation", "adj", "scen", "hist_eval"):
+            value = record.get(key)
+            if isinstance(value, dict):
+                declared.extend(
+                    (f"{name} / {key} / {fmt}", path)
+                    for fmt, path in value.items()
+                    if path is not None
+                )
+            elif value is not None:
+                declared.append((f"{name} / {key}", value))
+    return declared

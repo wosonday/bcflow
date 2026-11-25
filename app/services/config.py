@@ -9,24 +9,28 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
-import tempfile
+import os  # Kept at module scope for test monkeypatching of os.replace.
+from datetime import date, datetime
 from pathlib import Path
 
 import yaml
 
+from app.services._io import atomic_write_text, dump_json_strict, read_bounded_bytes
 from bcflow.config_loader import _resolve_paths
 
 _MAX_DOCUMENT_BYTES = 2 * 1024 * 1024
 _FORMATS = {".yaml", ".yml", ".json"}
 
 
+def list_example_configs(root: str | Path = "configs") -> list[str]:
+    """List shipped YAML/JSON configuration files under ``root``."""
+    return sorted(str(p) for p in Path(root).glob("*") if p.suffix.lower() in _FORMATS)
+
+
 def _format(format: str) -> str:
     suffix = format.lower()
     if suffix not in _FORMATS:
-        raise ValueError(
-            f"Unsupported config format {format!r}; use .yaml, .yml, or .json."
-        )
+        raise ValueError(f"Unsupported config format {format!r}; use .yaml, .yml, or .json.")
     return suffix
 
 
@@ -34,15 +38,7 @@ def load_document(path: str | Path) -> dict:
     """Read a UTF-8 mapping document (at most 2 MiB), hashing its raw bytes."""
     source = Path(path).resolve()
     suffix = _format(source.suffix)
-    try:
-        if not source.is_file():
-            raise ValueError(f"Config file not found: {source}")
-        with source.open("rb") as stream:
-            raw = stream.read(_MAX_DOCUMENT_BYTES + 1)
-    except OSError as exc:
-        raise ValueError(f"Cannot read config {source}: {exc}") from exc
-    if len(raw) > _MAX_DOCUMENT_BYTES:
-        raise ValueError(f"Config document exceeds the 2 MiB size limit: {source}")
+    raw = read_bounded_bytes(source, _MAX_DOCUMENT_BYTES, label="Config document")
     try:
         text = raw.decode("utf-8")
     except UnicodeDecodeError as exc:
@@ -75,59 +71,52 @@ def resolve_document(text: str, format: str, base_dir: str | Path) -> dict:
         raise ValueError(f"Cannot resolve config paths: {exc}") from exc
 
 
-def _canonical_json(config: dict) -> str:
-    if not isinstance(config, dict):
+def _json_date(value: object) -> str:
+    if isinstance(value, (date, datetime)):
+        return value.isoformat()
+    raise TypeError(f"Unsupported config value: {type(value).__name__}")
+
+
+def normalize_config_for_json(resolved: dict) -> tuple[dict, str]:
+    """Normalize YAML dates to ISO text and return ``(normalized, digest)``."""
+    if not isinstance(resolved, dict):
         raise ValueError("Config must be a mapping (dict).")
-    try:
-        return json.dumps(
-            config, sort_keys=True, separators=(",", ":"), allow_nan=False
-        )
-    except (TypeError, ValueError, RecursionError) as exc:
-        raise ValueError(
-            f"Config must contain valid finite JSON values: {exc}"
-        ) from exc
+    canonical = dump_json_strict(
+        resolved, sort_keys=True, separators=(",", ":"), default=_json_date
+    )
+    return json.loads(canonical), hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 def config_digest(config: dict) -> str:
     """Hash canonical, sorted, compact JSON; reject non-finite numbers."""
-    return hashlib.sha256(_canonical_json(config).encode("utf-8")).hexdigest()
+    return normalize_config_for_json(config)[1]
 
 
-def save_copy(config: dict, path: str | Path, *, overwrite: bool = False) -> Path:
+def save_copy(
+    config: dict,
+    path: str | Path,
+    *,
+    overwrite: bool = False,
+    source_path: str | Path | None = None,
+    create_parents: bool = False,
+) -> Path:
     """Atomically save an already-resolved mapping, never overwriting by default.
 
-    JSON normalization keeps YAML and JSON copies equivalent. The target's parent
-    must exist. A same-directory temporary file is published with an exclusive
-    hard link (no-clobber), or atomic replacement when explicitly requested.
+    JSON normalization keeps YAML and JSON copies equivalent. When
+    ``source_path`` is provided, saving back onto that file is refused. When
+    ``create_parents`` is false, the target's parent must already exist.
     """
-    target = Path(path).absolute()
+    if not isinstance(config, dict):
+        raise ValueError("Config must be a mapping (dict).")
+    target = Path(path).expanduser().absolute()
+    if source_path is not None and target.resolve() == Path(source_path).resolve():
+        raise ValueError("Choose a different destination; the source config is protected.")
     suffix = _format(target.suffix)
-    normalized = json.loads(_canonical_json(config))
-    text = (
-        json.dumps(normalized, indent=2, allow_nan=False) + "\n"
-        if suffix == ".json"
-        else yaml.safe_dump(normalized, sort_keys=True, allow_unicode=True)
-    )
-    temporary: Path | None = None
-    try:
-        with tempfile.NamedTemporaryFile(
-            mode="w",
-            encoding="utf-8",
-            newline="\n",
-            dir=target.parent,
-            prefix=f".{target.name}.",
-            suffix=".tmp",
-            delete=False,
-        ) as stream:
-            temporary = Path(stream.name)
-            stream.write(text)
-            stream.flush()
-            os.fsync(stream.fileno())
-        if overwrite:
-            os.replace(temporary, target)
-        else:
-            os.link(temporary, target)
-    finally:
-        if temporary is not None:
-            temporary.unlink(missing_ok=True)
-    return target
+    if suffix == ".json":
+        text = dump_json_strict(config, indent=2, sort_keys=True, default=_json_date) + "\n"
+    else:
+        normalized, _ = normalize_config_for_json(config)
+        text = yaml.safe_dump(normalized, sort_keys=True, allow_unicode=True)
+    if create_parents:
+        target.parent.mkdir(parents=True, exist_ok=True)
+    return atomic_write_text(target, text, overwrite=overwrite)
