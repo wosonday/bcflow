@@ -154,6 +154,25 @@ def select_workers(
     )
 
 
+_METHOD_MEMORY_FACTORS = {
+    "mbcn": 2.0,
+    "npdf_transform": 2.0,
+    "otc": 2.0,
+    "dotc": 2.0,
+    "principal_components": 1.5,
+}
+
+
+def method_memory_factor(method: str) -> float:
+    """Peak-RAM overhead of a correction method relative to univariate QDM.
+
+    Iterative and optimal-transport multivariate methods keep extra working
+    copies and rank/transport matrices; PCA holds scores and loadings.
+    Univariate methods and unknown names need no extra allowance.
+    """
+    return _METHOD_MEMORY_FACTORS.get(method, 1.0)
+
+
 def estimate_task_bytes(
     ref_steps: int,
     hist_steps: int,
@@ -162,6 +181,8 @@ def estimate_task_bytes(
     *,
     nquantiles: int = 50,
     groups: int = 12,
+    n_vars: int = 1,
+    method_factor: float = 1.0,
 ) -> int:
     """Estimate peak per-task RAM, not a guarantee or measured upper bound.
 
@@ -171,12 +192,24 @@ def estimate_task_bytes(
     corrected output and evaluation), on top of ~0.75 GiB for Python,
     xsdba and open files. Three grouped quantile arrays are added. Other
     variables, methods and allocators can exceed this heuristic.
+
+    `n_vars` scales the per-variable series, quantile arrays and evaluation.
+    `method_factor` (see `method_memory_factor`) adds the working copies of
+    multivariate methods. The worker baseline is paid once, so it is not
+    multiplied. Defaults reproduce the univariate estimate exactly.
     """
     if min(ref_steps, hist_steps, sim_steps, cells, nquantiles, groups) < 0:
         raise ValueError("task dimensions must be nonnegative")
+    if not isinstance(n_vars, int) or isinstance(n_vars, bool) or n_vars < 1:
+        raise ValueError("n_vars must be a positive integer")
+    if not isfinite(method_factor) or method_factor <= 0:
+        raise ValueError("method_factor must be finite and positive")
     inputs = (ref_steps + hist_steps + sim_steps) * cells * 8
     quantiles = cells * nquantiles * groups * 8 * 3
-    return int(inputs * _INPUT_FACTOR + quantiles + _WORKER_BASELINE)
+    return int(
+        (inputs * _INPUT_FACTOR + quantiles) * n_vars * method_factor
+        + _WORKER_BASELINE
+    )
 
 
 _INPUT_FACTOR = 4
