@@ -333,6 +333,42 @@ def _apply(data: np.ndarray, weights: sparse.csr_matrix) -> np.ndarray:
     return np.where(den >= 0.5, out, np.nan)
 
 
+def model_box(
+    da: xr.DataArray,
+    target: TargetGrid,
+    *,
+    method: str,
+    params: dict[str, Any] | None = None,
+    lat_name: str = "auto",
+    lon_name: str = "auto",
+) -> xr.DataArray:
+    """The part of the model grid every target cell needs, loaded into memory once.
+
+    regrid_to_points would otherwise read the same model cells from disk
+    again for each block. The box is the rows/columns the weights of all
+    target cells use, plus a margin of _HALO cells so each block's stencils
+    stay identical. The whole grid is kept when the target crosses the
+    0/360 seam or the model grid is not rectilinear; then each block reads
+    from the file as before.
+    """
+    lat, lon = resolve_latlon_dims(da, lat_name, lon_name, [], source_label="model")
+    if da[lat].ndim != 1 or da[lon].ndim != 1 or da[lat].size < 2 or da[lon].size < 2:
+        return da
+    lat_dim: Hashable = da[lat].dims[0]
+    lon_dim: Hashable = da[lon].dims[0]
+    weights = regrid_weights(da[lat].values, da[lon].values, target, method, params)
+    used = np.unique(weights.indices)
+    if used.size == 0:
+        return da
+    nlat, nlon = da.sizes[lat_dim], da.sizes[lon_dim]
+    rows, cols = used // nlon, used % nlon
+    r0, r1 = max(int(rows.min()) - _HALO, 0), min(int(rows.max()) + _HALO, nlat - 1)
+    c0, c1 = max(int(cols.min()) - _HALO, 0), min(int(cols.max()) + _HALO, nlon - 1)
+    if c1 - c0 + 1 > nlon // 2:  # spans the seam (or most of the globe): keep it whole
+        return da
+    return da.isel({lat_dim: slice(r0, r1 + 1), lon_dim: slice(c0, c1 + 1)}).load()
+
+
 def regrid_to_points(
     da: xr.DataArray,
     target: TargetGrid,

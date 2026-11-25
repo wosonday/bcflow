@@ -24,6 +24,11 @@ dependencies = [
 [project.scripts]
 bcflow = "bcflow.cli:main"
 
+[project.optional-dependencies]
+web = [
+    "streamlit>=1.67,<2",
+]
+
 [dependency-groups]
 dev = ["pytest>=9.2.0"]
 

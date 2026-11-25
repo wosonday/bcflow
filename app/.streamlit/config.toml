@@ -1,0 +1,22 @@
+[browser]
+gatherUsageStats = false
+
+[server]
+address = "127.0.0.1"
+headless = true
+
+[theme]
+font = "sans serif"
+showSidebarBorder = true
+
+[theme.light]
+primaryColor = "#00796B"
+backgroundColor = "#FFFFFF"
+secondaryBackgroundColor = "#F3F7F6"
+textColor = "#172B29"
+
+[theme.dark]
+primaryColor = "#60D5BD"
+backgroundColor = "#111C1B"
+secondaryBackgroundColor = "#1B2C29"
+textColor = "#E7F1EE"

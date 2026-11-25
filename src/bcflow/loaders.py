@@ -390,15 +390,65 @@ def grid_target(
     )
 
 
+# Above this size the reference cells are not cached in memory; each block
+# then reads its own rows from the file, as before.
+_CELL_CACHE_LIMIT = 2 * 1024**3
+
+
+def read_grid_cells(
+    da: xr.DataArray,
+    target: TargetGrid,
+    *,
+    chunk: int = 365,
+    on_progress: Callable[[int, int], None] | None = None,
+) -> np.ndarray | None:
+    """(time, cell) reference values of every target cell, read once.
+
+    Gridded observations are usually stored one time step per chunk (CDO
+    writes (1, lat, lon) chunks), so reading a band of rows over all time
+    decompresses the whole grid once per day -- for every block. Reading
+    whole time steps a year at a time and keeping only the target cells
+    costs one pass over the file. Returns None (read per block instead)
+    when the cells would take more than 2 GiB. Values keep the file's dtype.
+    """
+    nt = da.sizes["time"]
+    dtype = (
+        np.dtype(da.dtype) if np.issubdtype(da.dtype, np.floating) else np.dtype(float)
+    )
+    if nt * target.size * dtype.itemsize > _CELL_CACHE_LIMIT:
+        return None
+    out = np.empty((nt, target.size), dtype=dtype)
+    for a in range(0, nt, chunk):
+        b = min(a + chunk, nt)
+        out[a:b] = np.asarray(da.isel(time=slice(a, b)).values)[:, target.iy, target.ix]
+        if on_progress is not None:
+            on_progress(b, nt)
+    return out
+
+
 def load_grid_points(
-    da: xr.DataArray, target: TargetGrid, variable: str
+    da: xr.DataArray,
+    target: TargetGrid,
+    variable: str,
+    *,
+    values: np.ndarray | None = None,
 ) -> xr.DataArray:
-    """(time, station) reference values of the target cells; 'station' holds the cell ids."""
-    lat_dim = da.dims[1]  # rows; opened as (time, lat, lon)
-    top, bottom = int(target.iy.min()), int(target.iy.max())
-    band = np.asarray(da.isel({lat_dim: slice(top, bottom + 1)}).values, dtype=float)
+    """(time, station) reference values of the target cells; 'station' holds the cell ids.
+
+    `values` are the cells' series already read by read_grid_cells (in the
+    target's order); without them the cells' rows are read from the file.
+    """
+    if values is not None:
+        data = np.asarray(values, dtype=float)
+    else:
+        lat_dim = da.dims[1]  # rows; opened as (time, lat, lon)
+        top, bottom = int(target.iy.min()), int(target.iy.max())
+        band = np.asarray(
+            da.isel({lat_dim: slice(top, bottom + 1)}).values, dtype=float
+        )
+        data = band[:, target.iy - top, target.ix]
     return xr.DataArray(
-        band[:, target.iy - top, target.ix],
+        data,
         dims=("time", "station"),
         coords={
             "time": da["time"].values,

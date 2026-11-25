@@ -4,6 +4,30 @@ Pipeline hiệu chỉnh sai số khí hậu/thủy văn (bias correction), xây 
 [xsdba](https://github.com/Ouranosinc/xsdba), điều khiển bằng một file cấu hình
 YAML hoặc JSON thay vì sửa code Python trực tiếp.
 
+## Streamlit frontend
+
+The local web app lives in [`app/`](app/README.md), alongside `src/`, not inside
+the backend package. It opens/edits YAML or JSON configs, validates and runs the
+CLI in background processes, reports progress, requests cancellation, and displays
+QA/evaluation results. From the repository root:
+
+```sh
+uv sync --extra web
+uv run --extra web python -m app.launch
+```
+
+Open http://localhost:8501. This is a personal localhost app, not an authenticated
+multi-user service. See the app README for Windows setup, lifecycle limits, and
+path/snapshot behavior.
+
+## Rust learning project
+
+The Rust/GPUI project is preserved only in
+[`learning/rust-desktop/`](learning/rust-desktop/README.md), with its native
+connection milestone and Rust walkthrough. The duplicate `desktop/` folder and
+its obsolete CI workflow have been removed. Streamlit in `app/` is the current
+scientific-workflow frontend.
+
 ## Ý tưởng thiết kế
 
 - **Tách cấu hình khỏi thực thi**: ai đó chọn thuật toán, tham số qua

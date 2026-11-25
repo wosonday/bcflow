@@ -1,0 +1,48 @@
+name: Streamlit frontend
+
+on:
+  push:
+    paths:
+      - "app/**"
+      - "src/bcflow/**"
+      - "tests/test_web_*.py"
+      - "tests/conftest.py"
+      - "pyproject.toml"
+      - "uv.lock"
+      - ".github/workflows/web.yml"
+  pull_request:
+    paths:
+      - "app/**"
+      - "src/bcflow/**"
+      - "tests/test_web_*.py"
+      - "tests/conftest.py"
+      - "pyproject.toml"
+      - "uv.lock"
+      - ".github/workflows/web.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  frontend-tests:
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-2022]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - name: Install the optional web frontend
+        run: uv sync --extra web --dev --locked
+      - name: Streamlit-free services and launcher tests
+        run: uv run --extra web --locked python -m pytest tests/test_web_config.py tests/test_web_results.py tests/test_web_runner.py tests/test_web_launch.py -q
+      - name: Headless Streamlit UI tests
+        run: uv run --extra web --locked python -m pytest tests/test_web_app.py tests/test_web_results_ui.py -q

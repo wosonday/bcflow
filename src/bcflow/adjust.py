@@ -44,6 +44,7 @@ from .loaders import (
     grid_target,
     load_grid_points,
     load_model_variable,
+    read_grid_cells,
     load_station_variable,
     open_grid_reference,
     scan_grid,
@@ -51,7 +52,7 @@ from .loaders import (
 from .methods import METHOD_REGISTRY
 from .progress import RunControl
 from .qa import QACheck
-from .regrid import TargetGrid, regrid_to_points
+from .regrid import TargetGrid, model_box, regrid_to_points
 from .resources import WorkerPool, estimate_task_bytes, select_workers
 from .timeaxis import align_daily
 from .units import harmonize
@@ -191,18 +192,34 @@ def _run_grid(
         unit="cell",
     )
 
-    control.progress(variable, "loading_model", source="hist")
-    hist_all = _reference_years(
-        load_model_variable(model, "hist", variable, qa), reference
+    # Read once, then sliced per block (see read_grid_cells / model_box).
+    cells = read_grid_cells(
+        reference,
+        target,
+        on_progress=lambda completed, total: control.progress(
+            variable,
+            "reading_reference",
+            completed=completed,
+            total=total,
+            unit="time steps",
+        ),
     )
-    control.progress(variable, "loading_model", source="sim")
-    sim_all = load_model_variable(model, "sim", variable, qa)
     options = {
         "method": spec.regrid,
         "params": spec.regrid_params,
         "lat_name": model.lat_name,
         "lon_name": model.lon_name,
     }
+    control.progress(variable, "loading_model", source="hist")
+    hist_all = model_box(
+        _reference_years(load_model_variable(model, "hist", variable, qa), reference),
+        target,
+        **options,
+    )
+    control.progress(variable, "loading_model", source="sim")
+    sim_all = model_box(
+        load_model_variable(model, "sim", variable, qa), target, **options
+    )
     parts = []
     block_size = grid_cfg.block_size
     total_blocks = (target.size + block_size - 1) // block_size
@@ -274,7 +291,14 @@ def _run_grid(
                 control.progress(
                     variable, "extracting", source="reference", **block_context
                 )
-                ref = load_grid_points(reference, block, variable)
+                ref = load_grid_points(
+                    reference,
+                    block,
+                    variable,
+                    values=None
+                    if cells is None
+                    else cells[:, block_start : block_start + block.size],
+                )
                 control.progress(variable, "regridding", source="hist", **block_context)
                 hist = _clip(
                     regrid_to_points(

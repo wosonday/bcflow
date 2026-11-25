@@ -80,19 +80,31 @@ def _wet_freq(da: xr.DataArray, thresh: float) -> xr.DataArray:
     return (da >= thresh).where(da.notnull()).mean("time")
 
 
+def _obs_stats(obs: xr.DataArray, wet_thresh: float | None) -> dict[str, xr.DataArray]:
+    """What the metrics need from the observations, computed once for raw AND corrected."""
+    stats = {
+        "mean": obs.mean("time"),
+        "std": obs.std("time"),
+        "quantiles": obs.quantile(_QQ_LEVELS, dim="time"),
+    }
+    if wet_thresh is not None:
+        stats["wet_freq"] = _wet_freq(obs, wet_thresh)
+    return stats
+
+
 def _metrics(
     model: xr.DataArray,
-    obs: xr.DataArray,
+    obs: dict[str, xr.DataArray],
     obs_paired: xr.DataArray,
     wet_thresh: float | None,
 ) -> dict[str, xr.DataArray]:
-    """Every metric, one value per station."""
+    """Every metric, one value per station; `obs` comes from _obs_stats."""
     m = {
-        "mean_bias": model.mean("time") - obs.mean("time"),
-        "sd_ratio": model.std("time") / obs.std("time"),
+        "mean_bias": model.mean("time") - obs["mean"],
+        "sd_ratio": model.std("time") / obs["std"],
     }
     qm = model.quantile(_QQ_LEVELS, dim="time")
-    qo = obs.quantile(_QQ_LEVELS, dim="time")
+    qo = obs["quantiles"]
     for q in _REPORTED_QUANTILES:
         m[f"q{round(q * 100)}_bias"] = qm.sel(quantile=q, method="nearest") - qo.sel(
             quantile=q, method="nearest"
@@ -103,9 +115,7 @@ def _metrics(
         ((model.reset_coords(drop=True) - obs_paired) ** 2).mean("time")
     )
     if wet_thresh is not None:
-        m["wet_day_freq_diff"] = _wet_freq(model, wet_thresh) - _wet_freq(
-            obs, wet_thresh
-        )
+        m["wet_day_freq_diff"] = _wet_freq(model, wet_thresh) - obs["wet_freq"]
     return m
 
 
@@ -126,33 +136,34 @@ def evaluate(
     the ideal as the raw one (None when a value is missing).
     """
     obs_paired = obs_on_model_dates(obs, raw)  # raw and corrected share one time axis
-    before = _metrics(raw, obs, obs_paired, wet_thresh)
-    after = _metrics(corrected, obs, obs_paired, wet_thresh)
+    stats = _obs_stats(obs, wet_thresh)
+    before = _metrics(raw, stats, obs_paired, wet_thresh)
+    after = _metrics(corrected, stats, obs_paired, wet_thresh)
 
-    rows = []
+    # Whole arrays per metric, in the observations' station order (a .sel per
+    # station and metric used to dominate the cost for grids of thousands of cells).
+    stations = obs["station"].values
+    names = [str(s) for s in stations]
+    columns: dict[str, list] = {name: [] for name in COLUMNS}
     for metric, ideal in IDEAL.items():
         if metric not in before:
             continue
-        for station in obs["station"].values:
-            r = float(before[metric].sel(station=station))
-            c = float(after[metric].sel(station=station))
-            improved = (
-                abs(c - ideal) <= abs(r - ideal) + 1e-12
-                if np.isfinite(r) and np.isfinite(c)
-                else None
-            )
-            rows.append(
-                {
-                    "period": period,
-                    "station": str(station),
-                    "metric": metric,
-                    "ideal": ideal,
-                    "raw": r,
-                    "corrected": c,
-                    "improved": improved,
-                }
-            )
-    return pd.DataFrame(rows, columns=COLUMNS)
+        raw_values = np.asarray(
+            before[metric].sel(station=stations).values, dtype=float
+        )
+        new_values = np.asarray(after[metric].sel(station=stations).values, dtype=float)
+        finite = np.isfinite(raw_values) & np.isfinite(new_values)
+        closer = np.abs(new_values - ideal) <= np.abs(raw_values - ideal) + 1e-12
+        columns["period"] += [period] * len(names)
+        columns["station"] += names
+        columns["metric"] += [metric] * len(names)
+        columns["ideal"] += [ideal] * len(names)
+        columns["raw"] += raw_values.tolist()
+        columns["corrected"] += new_values.tolist()
+        columns["improved"] += [
+            bool(c) if f else None for c, f in zip(closer, finite, strict=True)
+        ]
+    return pd.DataFrame(columns, columns=COLUMNS)
 
 
 def paired_series(

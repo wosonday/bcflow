@@ -27,18 +27,34 @@ import json
 import signal
 import sys
 import threading
+from importlib import import_module
 from pathlib import Path
 
-import numpy as np
-from tqdm import tqdm
-
-from . import service
+from ._version import bcflow_version
+from .discovery import list_methods
 from .progress import RunControl
 
 _ICON = {"pass": "[PASS]", "warn": "[WARN]", "fail": "[FAIL]"}
 
 
+def __getattr__(name: str):
+    # Keep cli.service available to library callers and monkeypatch-based tests.
+    if name == "service":
+        module = import_module(".service", __package__)
+        globals()[name] = module
+        return module
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+def tqdm(*args, **kwargs):
+    from tqdm import tqdm as progress_bar
+
+    return progress_bar(*args, **kwargs)
+
+
 def _json_default(obj):
+    import numpy as np
+
     if isinstance(obj, np.generic):
         return obj.item()
     if isinstance(obj, np.ndarray):
@@ -199,6 +215,8 @@ class _ForcedCancellation(BaseException):
 
 
 def _cmd_run(args) -> int:
+    from . import service
+
     progress = None if args.json else _TerminalProgress()
     control = RunControl(
         _emit_json if args.json else progress, cancel_file=args.cancel_file
@@ -260,6 +278,8 @@ def _cmd_run(args) -> int:
 
 
 def _cmd_validate(args) -> int:
+    from . import service
+
     result = service.validate_config_file(args.config)
     if args.json:
         _emit_json(result)
@@ -280,6 +300,8 @@ def _cmd_validate(args) -> int:
 
 
 def _cmd_inspect(args) -> int:
+    from . import service
+
     try:
         info = service.inspect_path(args.path)
     except (OSError, ValueError) as exc:
@@ -293,7 +315,7 @@ def _cmd_inspect(args) -> int:
 
 
 def _cmd_methods(args) -> int:
-    methods = service.list_methods()
+    methods = list_methods()
     if args.json:
         _emit_json(methods)
     else:
@@ -303,6 +325,8 @@ def _cmd_methods(args) -> int:
 
 
 def _cmd_schema(args) -> int:
+    from . import service
+
     _print_pretty(service.config_json_schema())
     return 0
 
@@ -321,7 +345,7 @@ def _build_parser() -> argparse.ArgumentParser:
         prog="bcflow", description="Config-driven bias correction built on xsdba."
     )
     parser.add_argument(
-        "--version", action="version", version=f"%(prog)s {service.bcflow_version()}"
+        "--version", action="version", version=f"%(prog)s {bcflow_version()}"
     )
     sub = parser.add_subparsers(dest="command", required=True, metavar="COMMAND")
 

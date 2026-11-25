@@ -78,3 +78,23 @@ def grid_config(toy_config: dict, toy_paths: dict[str, Path]) -> dict:
         },
     }
     return cfg
+
+
+@pytest.fixture(scope="session")
+def web_component_discovery_cache():
+    """Scan the unchanged installed components once across native-widget AppTests.
+
+    Streamlit creates a fresh test runtime per rerun. Its distribution-file scan
+    otherwise repeatedly stats thousands of unrelated files, especially on WSL.
+    This retains actual discovery rather than substituting an empty registry.
+    """
+    from functools import lru_cache
+
+    from streamlit.components.v2 import manifest_scanner
+
+    original = manifest_scanner.scan_component_manifests
+    manifest_scanner.scan_component_manifests = lru_cache(maxsize=1)(original)
+    try:
+        yield
+    finally:
+        manifest_scanner.scan_component_manifests = original

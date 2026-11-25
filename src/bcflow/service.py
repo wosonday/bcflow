@@ -24,6 +24,7 @@ from ._version import bcflow_version
 from .config_loader import load_config_file
 from .config_schema import PipelineConfig, StationsConfig, load_config
 from .coverage import check_coverage
+from .discovery import list_methods
 from .loaders import (
     load_station_metadata,
     load_station_variable,
@@ -48,18 +49,6 @@ __all__ = [
 
 
 # --- methods / schema -------------------------------------------------------
-
-
-def _first_line(text: str | None) -> str:
-    return (text or "").strip().splitlines()[0] if (text or "").strip() else ""
-
-
-def list_methods() -> list[dict]:
-    """Correction methods a config may name in `method:`."""
-    return [
-        {"name": name, "class": cls.__name__, "summary": _first_line(cls.__doc__)}
-        for name, cls in METHOD_REGISTRY.items()
-    ]
 
 
 def config_json_schema() -> dict:
