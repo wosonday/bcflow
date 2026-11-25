@@ -218,14 +218,14 @@ def test_estimate_matches_the_measured_grid_block():
     ["ref_steps", "hist_steps", "sim_steps", "cells", "nquantiles", "groups"],
 )
 def test_estimate_scales_with_every_dimension(dimension):
-    dimensions = dict(
-        ref_steps=1000,
-        hist_steps=2000,
-        sim_steps=3000,
-        cells=10000,
-        nquantiles=50,
-        groups=12,
-    )
+    dimensions = {
+        "ref_steps": 1000,
+        "hist_steps": 2000,
+        "sim_steps": 3000,
+        "cells": 10000,
+        "nquantiles": 50,
+        "groups": 12,
+    }
     baseline = resources.estimate_task_bytes(**dimensions)
     dimensions[dimension] *= 2
     assert resources.estimate_task_bytes(**dimensions) > baseline

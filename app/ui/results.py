@@ -38,7 +38,10 @@ def _list_manifests(root: str) -> list[dict]:
 
 @st.cache_data(max_entries=10, show_spinner=False)
 def _read_qa(
-    manifest_path: str, manifest_stamp: tuple[int, int], qa_path: str, qa_stamp: tuple[int, int]
+    manifest_path: str,
+    manifest_stamp: tuple[int, int],
+    qa_path: str,
+    qa_stamp: tuple[int, int],
 ) -> list[dict]:
     # Include both file mtimes and sizes in the cache key.
     return service.read_qa(manifest_path)
@@ -59,7 +62,9 @@ def _read_evaluation(
 def _render_status(manifest: dict) -> None:
     st.subheader("Run status", anchor=False)
     status = manifest.get("status", "unknown")
-    st.caption(f"Run status: {status}. Created: {manifest.get('created') or 'not recorded'}.")
+    st.caption(
+        f"Run status: {status}. Created: {manifest.get('created') or 'not recorded'}."
+    )
     if status == "cancelled":
         st.warning(
             "This run was cancelled. Completed results remain available; cancelled and skipped variables are not successful outputs.",
@@ -70,8 +75,14 @@ def _render_status(manifest: dict) -> None:
             "This run did not complete successfully. Check each variable's status and QA checks.",
             icon=":material/warning:",
         )
-    statuses = {name: record.get("status", "unknown") for name, record in manifest["variables"].items()}
-    render_variable_status_table(statuses, alt="Status of every variable, including cancelled and skipped variables")
+    statuses = {
+        name: record.get("status", "unknown")
+        for name, record in manifest["variables"].items()
+    }
+    render_variable_status_table(
+        statuses,
+        alt="Status of every variable, including cancelled and skipped variables",
+    )
 
 
 @st.fragment
@@ -84,30 +95,47 @@ def _render_qa(manifest_path: str, manifest: dict) -> None:
         else:
             qa_file = service.artifact_path(manifest_path, relative_qa)
             checks = _read_qa(
-                manifest_path, _file_stamp(manifest_path), str(qa_file), _file_stamp(qa_file)
+                manifest_path,
+                _file_stamp(manifest_path),
+                str(qa_file),
+                _file_stamp(qa_file),
             )
     except (ValueError, OSError, RuntimeError) as exc:
         show_warning("Cannot read QA checks", exc)
         return
     render_qa_panel(checks, alt="Quality checks filtered by status and variable")
     if manifest.get("qa") is not None:
-        render_json_download("Download QA JSON", checks, "qa.json", "results_download_qa")
+        render_json_download(
+            "Download QA JSON", checks, "qa.json", "results_download_qa"
+        )
 
 
 @st.fragment
 def _render_evaluation(manifest_path: str, manifest: dict) -> None:
     st.subheader("Evaluation", anchor=False)
-    variables = [name for name, record in manifest["variables"].items() if record.get("evaluation") is not None]
+    variables = [
+        name
+        for name, record in manifest["variables"].items()
+        if record.get("evaluation") is not None
+    ]
     if not variables:
         st.info("No evaluation CSV is declared for this run.", icon=":material/info:")
         return
-    variable = st.selectbox("Evaluation variable", variables, key="results_evaluation_variable")
+    variable = st.selectbox(
+        "Evaluation variable", variables, key="results_evaluation_variable"
+    )
     if variable is None:
         return
     record = manifest["variables"][variable]
     try:
         csv = service.artifact_path(manifest_path, record["evaluation"])
-        data = _read_evaluation(manifest_path, variable, _file_stamp(manifest_path), str(csv), _file_stamp(csv))
+        data = _read_evaluation(
+            manifest_path,
+            variable,
+            _file_stamp(manifest_path),
+            str(csv),
+            _file_stamp(csv),
+        )
     except (ValueError, OSError, RuntimeError) as exc:
         show_warning("Cannot read this variable's evaluation", exc)
         return
@@ -123,7 +151,10 @@ def _render_evaluation(manifest_path: str, manifest: dict) -> None:
     if "period" in data:
         periods = data["period"].fillna("").astype(str).drop_duplicates().tolist()
         period = st.selectbox(
-            "Evaluation period", periods, format_func=lambda item: item or "Unspecified period", key="results_evaluation_period"
+            "Evaluation period",
+            periods,
+            format_func=lambda item: item or "Unspecified period",
+            key="results_evaluation_period",
         )
         data = data.loc[data["period"].fillna("").astype(str) == period, :]
     metrics = data["metric"].dropna().astype(str).drop_duplicates().tolist()
@@ -135,7 +166,9 @@ def _render_evaluation(manifest_path: str, manifest: dict) -> None:
         return
     filtered = data.loc[data["metric"].astype(str) == metric, :]
     st.dataframe(
-        filtered, hide_index=True, width="stretch",
+        filtered,
+        hide_index=True,
+        width="stretch",
         alt=f"{metric} evaluation preview for {variable}, raw and corrected values",
     )
     chart = _chart_data(filtered)
@@ -143,8 +176,14 @@ def _render_evaluation(manifest_path: str, manifest: dict) -> None:
         return
     y_label = _metric_label(metric, record, filtered)
     st.bar_chart(
-        chart, x="Location", y=["Raw", "Corrected"], x_label="Location", y_label=y_label,
-        stack=False, sort=False, width="stretch",
+        chart,
+        x="Location",
+        y=["Raw", "Corrected"],
+        x_label="Location",
+        y_label=y_label,
+        stack=False,
+        sort=False,
+        width="stretch",
         alt=f"Raw versus corrected {metric} for {variable} in the selected period",
     )
     st.caption(
@@ -182,7 +221,9 @@ def render() -> None:
     runtime = import_module("app.runtime")
 
     st.title(":material/analytics: Results")
-    st.caption("Inspect saved run status, quality checks and bounded evaluation previews.")
+    st.caption(
+        "Inspect saved run status, quality checks and bounded evaluation previews."
+    )
     manager = runtime.get_manager()
     config, config_error = runtime.current_config()
     cwd = Path(manager.cwd)
@@ -218,7 +259,9 @@ def render() -> None:
         prefix = "Latest completed run · " if path == latest else ""
         return f"{prefix}{Path(path).parent.name} · {row.get('status', 'saved run')} · {path}"
 
-    selected = st.selectbox("Saved run", [*paths, _MANUAL], format_func=label, key="results_manifest")
+    selected = st.selectbox(
+        "Saved run", [*paths, _MANUAL], format_func=label, key="results_manifest"
+    )
     if selected == _MANUAL:
         if not paths:
             st.info(
@@ -240,7 +283,9 @@ def render() -> None:
         return
     st.code(manifest_path, language=None)
     _render_status(manifest)
-    render_json_download("Download manifest JSON", manifest, "manifest.json", "results_download_manifest")
+    render_json_download(
+        "Download manifest JSON", manifest, "manifest.json", "results_download_manifest"
+    )
     _render_qa(manifest_path, manifest)
     _render_evaluation(manifest_path, manifest)
     _render_artifacts(manifest_path, manifest)

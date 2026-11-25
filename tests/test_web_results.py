@@ -350,7 +350,12 @@ def test_results_data_helpers(tmp_path):
 
     frame = results.qa_checks_frame(
         [
-            {"name": "c1", "status": "pass", "message": "ok", "context": {"variable": "tas"}},
+            {
+                "name": "c1",
+                "status": "pass",
+                "message": "ok",
+                "context": {"variable": "tas"},
+            },
             {"name": "c2", "status": "warn", "message": "w"},
         ]
     )

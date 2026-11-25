@@ -1,7 +1,7 @@
-from pathlib import Path
 import sys
-from tempfile import TemporaryDirectory
 import unittest
+from pathlib import Path
+from tempfile import TemporaryDirectory
 from urllib.parse import quote
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
@@ -39,7 +39,9 @@ class MarkdownTests(unittest.TestCase):
         self.assertIn((3, "MD004"), {(issue.line, issue.code) for issue in doc.issues})
 
     def test_longer_tilde_fence_with_nested_backticks(self):
-        self.assertEqual(self.codes("# Title\n~~~text\n```not a heading\n~~~~\n"), set())
+        self.assertEqual(
+            self.codes("# Title\n~~~text\n```not a heading\n~~~~\n"), set()
+        )
 
     def test_fence_suffix_does_not_close_block(self):
         self.assertIn("MD004", self.codes("# Title\n```\n```python\n"))
@@ -53,26 +55,36 @@ class MarkdownTests(unittest.TestCase):
         self.assertTrue({"ENC001", "ENC002"} <= codes)
 
     def test_table_wrong_width(self):
-        self.assertIn("MD007", self.codes("# T\n\n| A | B |\n|---|---|\n| one | two | three |\n"))
+        self.assertIn(
+            "MD007", self.codes("# T\n\n| A | B |\n|---|---|\n| one | two | three |\n")
+        )
 
     def test_table_escaped_pipe(self):
-        self.assertEqual(self.codes("# T\n\n| A | B |\n|---|---|\n| a\\|b | c |\n"), set())
+        self.assertEqual(
+            self.codes("# T\n\n| A | B |\n|---|---|\n| a\\|b | c |\n"), set()
+        )
 
     def test_table_separator_wrong_width(self):
         self.assertIn("MD007", self.codes("# T\n\n| A | B |\n|---|---|---|\n"))
 
     def test_unicode_numeric_heading_slug(self):
-        self.assertEqual(slug("3.1.1. Điều phối kinh phí AI"), "311-điều-phối-kinh-phí-ai")
+        self.assertEqual(
+            slug("3.1.1. Điều phối kinh phí AI"), "311-điều-phối-kinh-phí-ai"
+        )
 
     def test_duplicate_heading_anchors(self):
         doc = parse_document("a.md", "# T\n## Same\n## Same\n## Same-1\n")
         self.assertTrue({"same", "same-1", "same-1-1"} <= doc.anchors)
 
     def test_html_anchor(self):
-        self.assertIn("custom", parse_document("a.md", '# T\n<a id="custom"></a>\n').anchors)
+        self.assertIn(
+            "custom", parse_document("a.md", '# T\n<a id="custom"></a>\n').anchors
+        )
 
     def test_fenced_and_inline_code_links_ignored(self):
-        doc = parse_document("a.md", "# T\n`[x](missing.md)`\n```\n[x](other.md)\n```\n")
+        doc = parse_document(
+            "a.md", "# T\n`[x](missing.md)`\n```\n[x](other.md)\n```\n"
+        )
         self.assertEqual(doc.links, [])
 
     def test_unclosed_link(self):
@@ -160,7 +172,11 @@ class LocalLinkTests(unittest.TestCase):
         self.assertEqual(self.codes("https://invalid.example/not-requested"), set())
 
     def test_unsafe_schemes(self):
-        for destination in ("javascript:alert(1)", "data:text/plain,hello", "file:///private"):
+        for destination in (
+            "javascript:alert(1)",
+            "data:text/plain,hello",
+            "file:///private",
+        ):
             with self.subTest(destination=destination):
                 self.assertIn("LINK011", self.codes(destination))
 

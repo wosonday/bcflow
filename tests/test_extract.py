@@ -19,21 +19,32 @@ def _stations(lat, lon) -> xr.DataArray:
     return xr.DataArray(
         np.zeros((len(TIME), len(ids))),
         dims=("time", "station"),
-        coords={"time": TIME, "station": ids, "lat": ("station", lat), "lon": ("station", lon)},
+        coords={
+            "time": TIME,
+            "station": ids,
+            "lat": ("station", lat),
+            "lon": ("station", lon),
+        },
     )
 
 
 def _regular(values: np.ndarray, lat, lon) -> xr.DataArray:
     """(time, lat, lon) field, the same 2-D values on every day."""
     data = np.broadcast_to(values, (len(TIME), *values.shape)).copy()
-    return xr.DataArray(data, dims=("time", "lat", "lon"), coords={"time": TIME, "lat": lat, "lon": lon})
+    return xr.DataArray(
+        data, dims=("time", "lat", "lon"), coords={"time": TIME, "lat": lat, "lon": lon}
+    )
 
 
 def test_regular_grid_picks_the_closest_cell():
-    da = _regular(np.arange(9.0).reshape(3, 3), [20.0, 21.0, 22.0], [105.0, 106.0, 107.0])
+    da = _regular(
+        np.arange(9.0).reshape(3, 3), [20.0, 21.0, 22.0], [105.0, 106.0, 107.0]
+    )
     qa: list[QACheck] = []
 
-    out = extract_nearest(da, _stations([20.1, 21.9], [106.9, 105.2]), qa, source_label="tmax:hist")
+    out = extract_nearest(
+        da, _stations([20.1, 21.9], [106.9, 105.2]), qa, source_label="tmax:hist"
+    )
 
     assert out.dims == ("time", "station")
     assert out.sel(station="S0").values.tolist() == [2.0] * 3  # lat idx 0, lon idx 2
@@ -52,7 +63,9 @@ def test_station_outside_the_grid_warns():
     da = _regular(np.zeros((2, 2)), [10.0, 11.0], [100.0, 101.0])
     qa: list[QACheck] = []
     extract_nearest(da, _stations([30.0], [100.0]), qa, source_label="tmax:hist")
-    assert any(c.name == "extract:tmax:hist:outside_grid" and c.status == "warn" for c in qa)
+    assert any(
+        c.name == "extract:tmax:hist:outside_grid" and c.status == "warn" for c in qa
+    )
 
 
 def test_empty_nearest_cell_uses_the_closest_neighbour():
@@ -61,7 +74,9 @@ def test_empty_nearest_cell_uses_the_closest_neighbour():
     qa: list[QACheck] = []
 
     # nearest is the NaN centre; of its neighbours, (21, 107) is the closest
-    out = extract_nearest(da, _stations([21.0], [106.4]), qa, source_label="precip:hist", search_radius=1)
+    out = extract_nearest(
+        da, _stations([21.0], [106.4]), qa, source_label="precip:hist", search_radius=1
+    )
 
     assert out.isel(station=0).values.tolist() == [6.0] * 3
     warn = next(c for c in qa if c.name == "extract:precip:hist:neighbor_cell")
@@ -74,7 +89,9 @@ def test_no_data_within_radius_stays_empty_and_warns():
     da = _regular(values, [20.0, 21.0, 22.0], [105.0, 106.0, 107.0])
     qa: list[QACheck] = []
 
-    out = extract_nearest(da, _stations([22.0], [107.0]), qa, source_label="precip:hist", search_radius=1)
+    out = extract_nearest(
+        da, _stations([22.0], [107.0]), qa, source_label="precip:hist", search_radius=1
+    )
 
     assert bool(out.isnull().all())
     assert any(c.name == "extract:precip:hist:no_data" for c in qa)
@@ -83,7 +100,9 @@ def test_no_data_within_radius_stays_empty_and_warns():
 def test_search_radius_zero_disables_the_search():
     values = np.array([[np.nan, 2.0]])
     da = _regular(values, [20.0], [105.0, 106.0])
-    out = extract_nearest(da, _stations([20.0], [105.0]), [], source_label="precip:hist", search_radius=0)
+    out = extract_nearest(
+        da, _stations([20.0], [105.0]), [], source_label="precip:hist", search_radius=0
+    )
     assert bool(out.isnull().all())
 
 
@@ -95,13 +114,20 @@ def test_declared_and_aliased_coordinate_names():
 
     named = da.rename({"Latitude": "yc", "LONGITUDE": "xc"})
     out = extract_nearest(
-        named, _stations([21.0], [106.0]), [], lat_name="yc", lon_name="xc", source_label="tmax:hist"
+        named,
+        _stations([21.0], [106.0]),
+        [],
+        lat_name="yc",
+        lon_name="xc",
+        source_label="tmax:hist",
     )
     assert float(out.isel(time=0, station=0)) == 3.0
 
 
 def test_missing_latlon_fails_clearly():
-    da = _regular(np.zeros((2, 2)), [20.0, 21.0], [105.0, 106.0]).rename({"lat": "a", "lon": "b"})
+    da = _regular(np.zeros((2, 2)), [20.0, 21.0], [105.0, 106.0]).rename(
+        {"lat": "a", "lon": "b"}
+    )
     qa: list[QACheck] = []
     with pytest.raises(ValueError, match="lat/lon"):
         extract_nearest(da, _stations([20.0], [105.0]), qa, source_label="tmax:hist")
@@ -120,7 +146,11 @@ def test_curvilinear_grid_matches_brute_force_search():
     da = xr.DataArray(
         np.broadcast_to(values, (len(TIME), 21, 31)).copy(),
         dims=("time", "y", "x"),
-        coords={"time": TIME, "lat": (("y", "x"), true_lat), "lon": (("y", "x"), true_lon)},
+        coords={
+            "time": TIME,
+            "lat": (("y", "x"), true_lat),
+            "lon": (("y", "x"), true_lon),
+        },
     )
     slat = [true_lat[5, 10] + 0.001, true_lat[15, 20]]
     slon = [true_lon[5, 10] + 0.001, true_lon[15, 20]]

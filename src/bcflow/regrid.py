@@ -42,6 +42,7 @@ from __future__ import annotations
 
 from collections.abc import Hashable
 from dataclasses import dataclass
+from itertools import pairwise
 from typing import Any
 
 import numpy as np
@@ -238,7 +239,7 @@ def _overlaps(
     """For each target interval, (source index, overlap fraction of the target)."""
     f = (lambda v: np.sin(np.radians(v))) if sine else (lambda v: v)
     out = []
-    for lo, hi in zip(t_edges[:-1], t_edges[1:]):
+    for lo, hi in pairwise(t_edges):
         lo, hi = min(lo, hi), max(lo, hi)
         size = f(hi) - f(lo)
         pairs = []

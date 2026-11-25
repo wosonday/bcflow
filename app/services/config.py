@@ -30,7 +30,9 @@ def list_example_configs(root: str | Path = "configs") -> list[str]:
 def _format(format: str) -> str:
     suffix = format.lower()
     if suffix not in _FORMATS:
-        raise ValueError(f"Unsupported config format {format!r}; use .yaml, .yml, or .json.")
+        raise ValueError(
+            f"Unsupported config format {format!r}; use .yaml, .yml, or .json."
+        )
     return suffix
 
 
@@ -110,10 +112,15 @@ def save_copy(
         raise ValueError("Config must be a mapping (dict).")
     target = Path(path).expanduser().absolute()
     if source_path is not None and target.resolve() == Path(source_path).resolve():
-        raise ValueError("Choose a different destination; the source config is protected.")
+        raise ValueError(
+            "Choose a different destination; the source config is protected."
+        )
     suffix = _format(target.suffix)
     if suffix == ".json":
-        text = dump_json_strict(config, indent=2, sort_keys=True, default=_json_date) + "\n"
+        text = (
+            dump_json_strict(config, indent=2, sort_keys=True, default=_json_date)
+            + "\n"
+        )
     else:
         normalized, _ = normalize_config_for_json(config)
         text = yaml.safe_dump(normalized, sort_keys=True, allow_unicode=True)

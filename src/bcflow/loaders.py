@@ -504,4 +504,6 @@ def _fail(
             context={"variable": variable, **(context or {})},
         )
     )
-    raise ValueError(error if error is not None else f"{message} -- see QACheck '{name}'.")
+    raise ValueError(
+        error if error is not None else f"{message} -- see QACheck '{name}'."
+    )

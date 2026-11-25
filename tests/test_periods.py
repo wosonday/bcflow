@@ -69,8 +69,7 @@ def test_without_periods_evaluation_is_in_sample_and_flagged(toy_config):
     out = run_pipeline(toy_config)
     assert set(out["results"]["tmax"]["evaluation"]["period"]) == {"calibration"}
     assert any(
-        c.name == "evaluation:tmax:in_sample" and c.status == "warn"
-        for c in out["qa"]
+        c.name == "evaluation:tmax:in_sample" and c.status == "warn" for c in out["qa"]
     )
 
 

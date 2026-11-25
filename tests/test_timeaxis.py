@@ -89,9 +89,15 @@ def test_pipeline_runs_with_midday_model_stamps(toy_config, toy_paths):
             ds = ds.load()
         ds = ds.assign_coords(time=ds.indexes["time"] + pd.Timedelta(hours=12))
         ds.to_netcdf(toy_paths[key])
-    cfg = {**toy_config, "variables": ["precip"], "correction": {"precip": toy_config["correction"]["precip"]}}
+    cfg = {
+        **toy_config,
+        "variables": ["precip"],
+        "correction": {"precip": toy_config["correction"]["precip"]},
+    }
 
     out = run_pipeline(cfg)
 
-    assert out["results"]["precip"] is not None, [c.message for c in out["qa"] if c.status == "fail"]
+    assert out["results"]["precip"] is not None, [
+        c.message for c in out["qa"] if c.status == "fail"
+    ]
     assert out["results"]["precip"]["scen"]["time"].dt.hour.max() == 0

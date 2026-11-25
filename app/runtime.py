@@ -72,7 +72,9 @@ def matching_validation(digest: str) -> dict | None:
         (
             job
             for job in get_manager().history()
-            if job["kind"] == "validate" and job["config_digest"] == digest and not job["active"]
+            if job["kind"] == "validate"
+            and job["config_digest"] == digest
+            and not job["active"]
         ),
         None,
     )

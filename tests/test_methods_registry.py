@@ -8,7 +8,13 @@ import pytest
 import xsdba.adjustment
 
 from bcflow.discovery import METHOD_CATALOG
-from bcflow.methods import METHOD_REGISTRY, METHODS, MethodSpec, check_available, get_method
+from bcflow.methods import (
+    METHOD_REGISTRY,
+    METHODS,
+    MethodSpec,
+    check_available,
+    get_method,
+)
 
 
 def test_all_catalog_methods_resolve_to_xsdba_classes():

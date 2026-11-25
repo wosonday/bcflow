@@ -1,22 +1,31 @@
 import json
-from pathlib import Path
 import subprocess
 import sys
-from tempfile import TemporaryDirectory
 import unittest
+from pathlib import Path
+from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
 from harness_markdown import parse_document
 from harness_routing import (
-    BACKGROUND, CONTRACTS, FLASH, PRO, SAFETY, check_contracts, check_model_ids, contract,
+    BACKGROUND,
+    CONTRACTS,
+    FLASH,
+    PRO,
+    SAFETY,
+    check_contracts,
+    check_model_ids,
+    contract,
 )
 from lint_harness import REQUIRED, lint
 
 
 def block(name: str, rows: dict[str, str]) -> str:
-    contents = "\n".join(f"| `{key}` | `{value}` | Scope |" for key, value in rows.items())
+    contents = "\n".join(
+        f"| `{key}` | `{value}` | Scope |" for key, value in rows.items()
+    )
     return (
         f"<!-- harness:{name}:start -->\n"
         f"| Role | Model | Scope |\n|---|---|---|\n{contents}\n"
@@ -31,7 +40,9 @@ class ModelTests(unittest.TestCase):
         return {issue.code for issue in doc.issues}
 
     def test_confirmed_models(self):
-        self.assertEqual(self.codes("\n".join([FLASH, PRO, *BACKGROUND.values()])), set())
+        self.assertEqual(
+            self.codes("\n".join([FLASH, PRO, *BACKGROUND.values()])), set()
+        )
 
     def test_approved_variant(self):
         self.assertEqual(self.codes(FLASH + "#high"), set())
@@ -46,7 +57,10 @@ class ModelTests(unittest.TestCase):
         self.assertIn("MODEL002", self.codes("opencode/deepseek-v4-pro"))
 
     def test_unknown_nvidia_alias_or_model(self):
-        for value in ("nvidia-kimi/moonshotai/kimi-typo", "nvidia-other/nvidia/nemotron"):
+        for value in (
+            "nvidia-kimi/moonshotai/kimi-typo",
+            "nvidia-other/nvidia/nemotron",
+        ):
             self.assertIn("MODEL002", self.codes(value))
 
     def test_model_ids_are_case_sensitive(self):
@@ -54,7 +68,9 @@ class ModelTests(unittest.TestCase):
             self.assertIn("MODEL002", self.codes(value))
 
     def test_explanatory_namespace_wildcard(self):
-        self.assertEqual(self.codes("Not a silent fallback: `opencode/deepseek-*`."), set())
+        self.assertEqual(
+            self.codes("Not a silent fallback: `opencode/deepseek-*`."), set()
+        )
 
     def test_namespace_wildcard_is_not_runnable(self):
         for selection in (
@@ -65,7 +81,10 @@ class ModelTests(unittest.TestCase):
 
     def test_archived_retired_id_allowed(self):
         self.assertEqual(
-            self.codes("Retired: opencode/deepseek-v4.1-flash-free", "docs/superpowers/specs/a.md"),
+            self.codes(
+                "Retired: opencode/deepseek-v4.1-flash-free",
+                "docs/superpowers/specs/a.md",
+            ),
             set(),
         )
 
@@ -98,7 +117,8 @@ class ContractTests(unittest.TestCase):
 
     def test_duplicate_rule(self):
         text = block("safety", SAFETY).replace(
-            "<!-- harness:safety:end -->", "| `writes` | `none` | duplicate |\n<!-- harness:safety:end -->"
+            "<!-- harness:safety:end -->",
+            "| `writes` | `none` | duplicate |\n<!-- harness:safety:end -->",
         )
         self.assertIn("POLICY003", self.parse(text)[1])
 
@@ -106,17 +126,28 @@ class ContractTests(unittest.TestCase):
         self.assertIn("POLICY001", self.parse(block("safety", SAFETY) * 2)[1])
 
     def test_markers_in_example_do_not_count(self):
-        self.assertIn("POLICY001", self.parse("````\n" + block("safety", SAFETY) + "````\n")[1])
+        self.assertIn(
+            "POLICY001", self.parse("````\n" + block("safety", SAFETY) + "````\n")[1]
+        )
 
     def test_reversed_markers(self):
-        self.assertIn("POLICY001", self.parse("<!-- harness:safety:end -->\n<!-- harness:safety:start -->\n")[1])
+        self.assertIn(
+            "POLICY001",
+            self.parse("<!-- harness:safety:end -->\n<!-- harness:safety:start -->\n")[
+                1
+            ],
+        )
 
     def test_missing_header_is_not_accepted(self):
-        text = block("safety", SAFETY).replace("| Role | Model | Scope |\n|---|---|---|\n", "")
+        text = block("safety", SAFETY).replace(
+            "| Role | Model | Scope |\n|---|---|---|\n", ""
+        )
         self.assertIn("POLICY008", self.parse(text)[1])
 
     def test_malformed_table(self):
-        text = block("safety", SAFETY).replace("| `writes` | `none` | Scope |", "| `writes` |")
+        text = block("safety", SAFETY).replace(
+            "| `writes` | `none` | Scope |", "| `writes` |"
+        )
         self.assertIn("POLICY002", self.parse(text)[1])
 
     def test_missing_policy_files_fails_closed(self):
@@ -131,7 +162,9 @@ class IntegrationTests(unittest.TestCase):
         for path in REQUIRED:
             self.write(path, "# Document\n")
         for filename, blocks in CONTRACTS.items():
-            text = "# Policy\n\n" + "\n".join(block(name, rows) for name, rows in blocks.items())
+            text = "# Policy\n\n" + "\n".join(
+                block(name, rows) for name, rows in blocks.items()
+            )
             self.write("docs/" + filename, text)
 
     def write(self, relative: str, text: str):
@@ -150,7 +183,9 @@ class IntegrationTests(unittest.TestCase):
             self.assertIn("IO005", {issue.code for issue in lint(Path(root)).issues})
 
     def test_nonexistent_root(self):
-        self.assertIn("IO004", {issue.code for issue in lint(self.root / "missing").issues})
+        self.assertIn(
+            "IO004", {issue.code for issue in lint(self.root / "missing").issues}
+        )
 
     def test_deleted_required_doc(self):
         (self.root / "AGENTS-TUTORIAL.md").unlink()
@@ -164,6 +199,7 @@ class IntegrationTests(unittest.TestCase):
         def failed_walk(root, *, onerror, followlinks):
             onerror(PermissionError(13, "denied", str(root)))
             return iter(())
+
         with patch("lint_harness.os.walk", side_effect=failed_walk):
             self.assertIn("IO001", self.codes())
 
@@ -176,7 +212,9 @@ class IntegrationTests(unittest.TestCase):
 
     def test_safety_contract_drift(self):
         path = self.root / "docs/NVIDIA-BACKGROUND.md"
-        text = path.read_text(encoding="utf-8").replace("`background-only`", "`interactive`")
+        text = path.read_text(encoding="utf-8").replace(
+            "`background-only`", "`interactive`"
+        )
         path.write_text(text, encoding="utf-8")
         self.assertIn("POLICY004", self.codes())
 
@@ -187,14 +225,18 @@ class IntegrationTests(unittest.TestCase):
     def test_nvidia_cannot_be_routed_as_worker(self):
         path = self.root / "docs/OPENCODE-WORKERS-REVIEWER.md"
         text = path.read_text(encoding="utf-8").replace(
-            f"| `worker-fast` | `{FLASH}`", f"| `worker-fast` | `{BACKGROUND['background-kimi']}`"
+            f"| `worker-fast` | `{FLASH}`",
+            f"| `worker-fast` | `{BACKGROUND['background-kimi']}`",
         )
         path.write_text(text, encoding="utf-8")
         self.assertIn("POLICY004", self.codes())
 
     def test_wrong_write_permission_fails(self):
         path = self.root / "docs/NVIDIA-BACKGROUND.md"
-        path.write_text(path.read_text(encoding="utf-8").replace("`none`", "`all`"), encoding="utf-8")
+        path.write_text(
+            path.read_text(encoding="utf-8").replace("`none`", "`all`"),
+            encoding="utf-8",
+        )
         self.assertIn("POLICY004", self.codes())
 
     def test_ignored_worktree_content(self):
@@ -202,7 +244,9 @@ class IntegrationTests(unittest.TestCase):
         self.assertEqual(self.codes(), set())
 
     def test_opencode_agent_prompts_are_not_harness_docs(self):
-        self.write(".opencode/agent/worker.md", "---\nmodel: x\n---\nNo heading here.\n")
+        self.write(
+            ".opencode/agent/worker.md", "---\nmodel: x\n---\nNo heading here.\n"
+        )
         self.assertEqual(self.codes(), set())
 
     def test_ua_graph_directory_is_ignored(self):
@@ -215,14 +259,24 @@ class IntegrationTests(unittest.TestCase):
 
     def test_cli_json_and_exit_codes(self):
         script = Path(__file__).resolve().parents[1] / "scripts/lint_harness.py"
-        args = [sys.executable, "-B", str(script), "--root", str(self.root), "--format", "json"]
+        args = [
+            sys.executable,
+            "-B",
+            str(script),
+            "--root",
+            str(self.root),
+            "--format",
+            "json",
+        ]
         good = subprocess.run(args, capture_output=True, text=True, check=False)
         self.assertEqual(good.returncode, 0, good.stderr)
         self.assertEqual(json.loads(good.stdout)["issues"], [])
         self.write("docs/broken.md", "# Broken\n[x](missing.md)\n")
         bad = subprocess.run(args, capture_output=True, text=True, check=False)
         self.assertEqual(bad.returncode, 1, bad.stderr)
-        self.assertIn("LINK007", {issue["code"] for issue in json.loads(bad.stdout)["issues"]})
+        self.assertIn(
+            "LINK007", {issue["code"] for issue in json.loads(bad.stdout)["issues"]}
+        )
 
 
 if __name__ == "__main__":

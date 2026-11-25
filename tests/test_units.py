@@ -19,7 +19,9 @@ def _da(values, units):
 
 def test_kelvin_to_celsius():
     qa = []
-    out, converted_from = to_units(_da([273.15, 300.0], "K"), "degC", qa, label="tas:hist")
+    out, converted_from = to_units(
+        _da([273.15, 300.0], "K"), "degC", qa, label="tas:hist"
+    )
     np.testing.assert_allclose(out.values, [0.0, 26.85])
     assert converted_from == "K"
     assert qa == []
@@ -27,7 +29,9 @@ def test_kelvin_to_celsius():
 
 def test_precip_mass_flux_to_depth_rate_uses_water_density():
     """1 kg m-2 s-1 of water = 1 mm s-1 = 86400 mm d-1."""
-    out, _ = to_units(_da([1 / 86400, 2 / 86400], "kg m-2 s-1"), "mm d-1", [], label="pr:hist")
+    out, _ = to_units(
+        _da([1 / 86400, 2 / 86400], "kg m-2 s-1"), "mm d-1", [], label="pr:hist"
+    )
     np.testing.assert_allclose(out.values, [1.0, 2.0])
     assert out.attrs["units"] == "mm d-1"
 
@@ -54,7 +58,14 @@ def test_incompatible_or_unknown_units_fail_clearly(src):
 
 def test_harmonize_reports_all_conversions_in_one_check():
     qa = []
-    ref, hist, sim, units = harmonize(_da([20.0], "degC"), _da([293.15], "K"), _da([293.15], "K"), "degC", qa, name="tas")
+    _ref, hist, sim, units = harmonize(
+        _da([20.0], "degC"),
+        _da([293.15], "K"),
+        _da([293.15], "K"),
+        "degC",
+        qa,
+        name="tas",
+    )
     np.testing.assert_allclose([hist.item(), sim.item()], [20.0, 20.0])
     assert units == "degC"
     summary = next(c for c in qa if c.name == "units:tas:summary")
@@ -63,7 +74,9 @@ def test_harmonize_reports_all_conversions_in_one_check():
 
 def test_harmonize_without_declared_units_uses_hist_units_and_warns():
     qa = []
-    ref, *_, units = harmonize(_da([1.0], ""), _da([1.0], "mm/day"), _da([1.0], "mm/day"), "", qa, name="pr")
+    ref, *_, units = harmonize(
+        _da([1.0], ""), _da([1.0], "mm/day"), _da([1.0], "mm/day"), "", qa, name="pr"
+    )
     assert units == "mm/day" and ref.attrs["units"] == "mm/day"
     assert any(c.name == "units:pr:undeclared" and c.status == "warn" for c in qa)
 
@@ -81,6 +94,8 @@ def test_pipeline_corrects_kelvin_model_data_like_celsius(toy_config, toy_paths)
         ds.to_netcdf(toy_paths[key])
 
     out = run_pipeline(cfg)
-    np.testing.assert_allclose(out["results"]["tmax"]["scen"].values, baseline.values, atol=1e-6)
+    np.testing.assert_allclose(
+        out["results"]["tmax"]["scen"].values, baseline.values, atol=1e-6
+    )
     summary = next(c for c in out["qa"] if c.name == "units:tmax:summary")
     assert summary.context["converted"] == {"hist": "K", "sim": "K"}

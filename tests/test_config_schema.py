@@ -10,7 +10,13 @@ from pydantic import ValidationError
 
 from bcflow.config_schema import TargetConfig, VariableName, load_config
 from bcflow.discovery import get_method_meta
-from bcflow.variables import DEFAULTS, VARIABLES, VariableSpec, resolve, resolve_method_params
+from bcflow.variables import (
+    DEFAULTS,
+    VARIABLES,
+    VariableSpec,
+    resolve,
+    resolve_method_params,
+)
 
 
 def test_valid_config_loads(toy_config):
@@ -30,7 +36,11 @@ def test_spec_merges_defaults_and_overrides(toy_config):
     assert precip.group == "none" and precip.method == "empirical_quantile_mapping"
     assert tmax.group == "dayofyear" and tmax.window == 15
     # kept from the defaults
-    assert precip.kind == "*" and precip.adapt_freq is True and precip.bounds == (0.0, None)
+    assert (
+        precip.kind == "*"
+        and precip.adapt_freq is True
+        and precip.bounds == (0.0, None)
+    )
     assert tmax.kind == "+" and tmax.units == "degC"
 
 
@@ -148,7 +158,9 @@ def test_resolve_method_params_parity():
 
 
 def test_resolve_method_params_explicit_adjust_on_scaling_passes_through():
-    spec = resolve("precip", {"method": "scaling", "adjust_params": {"interp": "linear"}})
+    spec = resolve(
+        "precip", {"method": "scaling", "adjust_params": {"interp": "linear"}}
+    )
     train, adjust = resolve_method_params(spec, get_method_meta("scaling"))
     assert train == {}
     assert adjust == {"interp": "linear"}
@@ -188,7 +200,9 @@ def test_post_config_shape_and_extra_forbid(toy_config):
     cfg = load_config(raw)
     assert len(cfg.correction["precip"].post) == 1
     assert cfg.correction["precip"].post[0].method == "extreme_values"
-    assert cfg.correction["precip"].post[0].train_params == {"cluster_thresh": "10 mm d-1"}
+    assert cfg.correction["precip"].post[0].train_params == {
+        "cluster_thresh": "10 mm d-1"
+    }
     assert cfg.spec("precip").method == "empirical_quantile_mapping"
 
     bad = copy.deepcopy(raw)

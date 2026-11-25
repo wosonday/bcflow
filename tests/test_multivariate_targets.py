@@ -10,6 +10,7 @@ import numpy as np
 import pandas as pd
 import pytest
 import xarray as xr
+from make_toy_data import generate_toy_dataset
 
 from app.services.results import (
     artifact_path,
@@ -23,7 +24,6 @@ from bcflow.config_schema import OutputConfig
 from bcflow.progress import RunControl
 from bcflow.resources import WorkerSelection
 from bcflow.writers import write_run
-from make_toy_data import generate_toy_dataset
 
 
 @pytest.fixture
@@ -85,7 +85,9 @@ def _write_and_read(out, config, folder):
                 values = ds[name].transpose("time", "station").values
             else:
                 grid = result["grid"]
-                values = ds[name].transpose("time", "lat", "lon").values[:, grid.iy, grid.ix]
+                values = (
+                    ds[name].transpose("time", "lat", "lon").values[:, grid.iy, grid.ix]
+                )
             np.testing.assert_allclose(
                 values, result["scen"].transpose("time", "station"), rtol=1e-6
             )
@@ -162,7 +164,7 @@ def test_multivariate_pipeline_and_outputs(
         monkeypatch.setattr(adjust, "select_workers", select)
 
     outputs = []
-    for workers in ((1, 2) if reference == "grid" else (1,)):
+    for workers in (1, 2) if reference == "grid" else (1,):
         if reference == "grid":
             cfg["grid"]["workers"] = workers
         events = []
@@ -179,7 +181,8 @@ def test_multivariate_pipeline_and_outputs(
             for i, v in enumerate(("tmax", "precip"), 1)
         ]
         assert [e["variable"] for e in events if e["event"] == "variable_finished"] == [
-            "tmax", "precip"
+            "tmax",
+            "precip",
         ]
         qa_events = [e for e in events if e["event"] == "qa"]
         assert [e["check"] for e in qa_events] == [c.as_dict() for c in out["qa"]]
@@ -221,7 +224,8 @@ def test_multivariate_pipeline_and_outputs(
 def test_mbcn_unequal_validation_length_warns(target_config):
     cfg = copy.deepcopy(target_config)
     cfg["targets"][0].update(
-        method="mbcn", group="none",
+        method="mbcn",
+        group="none",
         train_params={"n_iter": 2, "base_kws": {"nquantiles": 10}},
     )
     cfg["periods"]["validation"] = ["2002-01-01", "2002-06-30"]
@@ -248,7 +252,9 @@ def test_station_intersection_warns_and_writes_common_stations(target_config, tm
     pd.read_csv(station).drop(columns=["precip"]).to_csv(station, index=False)
     out = pipeline.run_pipeline(target_config)
     assert not [c for c in out["qa"] if c.status == "fail"]
-    warning = next(c for c in out["qa"] if c.name == "target:joint:station_intersection")
+    warning = next(
+        c for c in out["qa"] if c.name == "target:joint:station_intersection"
+    )
     assert warning.status == "warn"
     assert warning.context["dropped_stations"] == ["ST02"]
     for result in out["results"].values():
@@ -273,14 +279,20 @@ def test_failed_target_isolates_all_its_variables(target_config, tmp_path):
     cfg["targets"].append({"name": "good", "variables": ["tmin"], "method": "scaling"})
     events = []
     out = pipeline.run_pipeline(cfg, events.append)
-    assert out["variable_statuses"] == {"tmax": "failed", "precip": "failed", "tmin": "ok"}
+    assert out["variable_statuses"] == {
+        "tmax": "failed",
+        "precip": "failed",
+        "tmin": "ok",
+    }
     assert out["results"]["tmax"] is out["results"]["precip"] is None
     error = next(c for c in out["qa"] if c.name == "pipeline:bad:exception")
     assert error.status == "fail"
     assert error.message.startswith("Target 'bad' failed: ")
     assert error.context == {"target": "bad", "variables": ["tmax", "precip"]}
     assert [e["variable"] for e in events if e["event"] == "variable_finished"] == [
-        "tmax", "precip", "tmin"
+        "tmax",
+        "precip",
+        "tmin",
     ]
     manifest = _write_and_read(out, cfg, tmp_path / "outputs")
     assert manifest["status"] == "failed"
@@ -324,9 +336,12 @@ def test_cancel_multivariate_target_retains_completed_and_skips_later(
     ]
     assert [
         (e["variable"], e["status"])
-        for e in events if e["event"] == "variable_finished"
+        for e in events
+        if e["event"] == "variable_finished"
     ] == [
-        ("tmin", "ok"), ("tmax", "cancelled"), ("precip", "cancelled"),
+        ("tmin", "ok"),
+        ("tmax", "cancelled"),
+        ("precip", "cancelled"),
     ]
     assert [e["index"] for e in events if e["event"] == "variable_started"] == [1, 2, 3]
     assert events[-1]["event"] == "run_cancelled"
@@ -346,9 +361,7 @@ def joint_grid_inputs():
             coords={"time": time, "lat": [10.0, 20.0], "lon": [100.0, 110.0]},
             attrs={"units": units},
         )
-        for name, offset, units in (
-            ("tmax", 25.0, "degC"), ("precip", 100.0, "mm d-1")
-        )
+        for name, offset, units in (("tmax", 25.0, "degC"), ("precip", 100.0, "mm d-1"))
     }
     fields["precip"][0] = [[100.0, 101.0], [200.0, 201.0]]
     references = {name: field.copy(deep=True) for name, field in fields.items()}
@@ -357,26 +370,35 @@ def joint_grid_inputs():
     # Geographic coordinates deliberately differ from the dimension indexes.
     references = {
         name: field.rename(lat="y", lon="x").assign_coords(
-            latitude=("y", field.lat.values), longitude=("x", field.lon.values),
-            y=[0, 1], x=[0, 1],
+            latitude=("y", field.lat.values),
+            longitude=("x", field.lon.values),
+            y=[0, 1],
+            x=[0, 1],
         )
         for name, field in references.items()
     }
     cfg = {
         "variables": ["tmax", "precip"],
         "grid": {
-            "path": "unused.nc", "workers": 1, "block_size": 1,
+            "path": "unused.nc",
+            "workers": 1,
+            "block_size": 1,
             "var_map": {"tmax": "tmax", "precip": "precip"},
         },
         "model": {
-            "hist": "unused.nc", "sim": "unused.nc",
+            "hist": "unused.nc",
+            "sim": "unused.nc",
             "var_map": {"tmax": "tmax", "precip": "precip"},
         },
         "periods": {"calibration": ["2001", "2001"]},
-        "targets": [{
-            "name": "joint", "variables": ["tmax", "precip"],
-            "method": "principal_components", "group": "none",
-        }],
+        "targets": [
+            {
+                "name": "joint",
+                "variables": ["tmax", "precip"],
+                "method": "principal_components",
+                "group": "none",
+            }
+        ],
     }
     return cfg, references, fields
 
@@ -392,11 +414,14 @@ def test_multivariate_grid_reversed_axes_keep_values_at_true_coordinates(
         {reverse_dim: slice(None, None, -1)}
     )
     monkeypatch.setattr(
-        adjust, "open_grid_reference",
+        adjust,
+        "open_grid_reference",
         lambda grid, variable, qa: (references[variable], "latitude", "longitude"),
     )
     monkeypatch.setattr(
-        adjust, "load_model_variable", lambda model, kind, variable, qa: fields[variable]
+        adjust,
+        "load_model_variable",
+        lambda model, kind, variable, qa: fields[variable],
     )
     if not cached:
         monkeypatch.setattr(adjust, "read_grid_cells", lambda *args, **kwargs: None)
@@ -432,10 +457,12 @@ def test_multivariate_grid_axis_mismatch_fails_before_model_loading(
     dim = ref[axis].dims[0]
     references["precip"] = (
         ref.assign_coords({axis: ref[axis] + 1.0})
-        if mismatch == "shifted" else ref.isel({dim: [0]})
+        if mismatch == "shifted"
+        else ref.isel({dim: [0]})
     )
     monkeypatch.setattr(
-        adjust, "open_grid_reference",
+        adjust,
+        "open_grid_reference",
         lambda grid, variable, qa: (references[variable], "latitude", "longitude"),
     )
 
@@ -462,11 +489,14 @@ def test_multivariate_grid_coordinate_roundoff_preserves_reference_coordinates(
         latitude=ref.latitude + 5e-7, longitude=ref.longitude + 5e-7
     )
     monkeypatch.setattr(
-        adjust, "open_grid_reference",
+        adjust,
+        "open_grid_reference",
         lambda grid, variable, qa: (references[variable], "latitude", "longitude"),
     )
     monkeypatch.setattr(
-        adjust, "load_model_variable", lambda model, kind, variable, qa: fields[variable]
+        adjust,
+        "load_model_variable",
+        lambda model, kind, variable, qa: fields[variable],
     )
     out = pipeline.run_pipeline(cfg)
     assert out["variable_statuses"] == {"tmax": "ok", "precip": "ok"}
@@ -474,6 +504,7 @@ def test_multivariate_grid_coordinate_roundoff_preserves_reference_coordinates(
     result = out["results"]["precip"]
     np.testing.assert_array_equal(result["grid"].lat, [10.0, 20.0])
     np.testing.assert_array_equal(result["grid"].lon, [100.0, 110.0])
-    assert float(
-        result["hist_eval"]["obs"].sel(station="10.0000_100.0000").isel(time=0)
-    ) == 100.0
+    assert (
+        float(result["hist_eval"]["obs"].sel(station="10.0000_100.0000").isel(time=0))
+        == 100.0
+    )

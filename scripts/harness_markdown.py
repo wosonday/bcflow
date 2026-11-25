@@ -1,9 +1,9 @@
 """Small, offline Markdown checks for this harness, not a CommonMark parser."""
 
-from dataclasses import dataclass, field
-from pathlib import Path
 import re
 import unicodedata
+from dataclasses import dataclass, field
+from pathlib import Path
 from urllib.parse import unquote, urlsplit
 
 
@@ -33,9 +33,9 @@ HEADING = re.compile(r"^(#{1,6})[ \t]+(.+?)\s*#*\s*$")
 INLINE_CODE = re.compile(r"(`+)(.+?)\1")
 LINK_START = re.compile(r"!?\[[^\]\n]*\]\(")
 REFERENCE = re.compile(r"!?\[([^\]\n]+)\]\[([^\]\n]*)\]")
-DEFINITION = re.compile(r'^\s{0,3}\[([^\]]+)\]:\s*(<[^>]+>|\S+)(?:\s+.*)?$')
+DEFINITION = re.compile(r"^\s{0,3}\[([^\]]+)\]:\s*(<[^>]+>|\S+)(?:\s+.*)?$")
 DESTINATION = re.compile(r"""^(<[^>]+>|\S+?)(?:\s+["'].*["'])?$""")
-HTML_ANCHOR = re.compile(r'<a\s+(?:id|name)=["\']([^"\']+)["\']', re.I)
+HTML_ANCHOR = re.compile(r'<a\s+(?:id|name)=["\']([^"\']+)["\']', re.IGNORECASE)
 SEPARATOR = re.compile(r"^\s*\|?(?:\s*:?-+:?\s*\|)+\s*:?-*:?\s*\|?\s*$")
 
 
@@ -43,7 +43,8 @@ def slug(heading: str) -> str:
     heading = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", heading)
     heading = re.sub(r"<[^>]*>", "", heading).replace("`", "").lower().strip()
     return "".join(
-        char for char in heading
+        char
+        for char in heading
         if char in "_- " or unicodedata.category(char)[0] in "LMN"
     ).replace(" ", "-")
 
@@ -70,7 +71,11 @@ def visible_lines(doc: Document) -> None:
             marker, suffix = match.groups()
             if opened is None:
                 opened = (marker[0], len(marker), number)
-            elif marker[0] == opened[0] and len(marker) >= opened[1] and not suffix.strip():
+            elif (
+                marker[0] == opened[0]
+                and len(marker) >= opened[1]
+                and not suffix.strip()
+            ):
                 opened = None
             continue
         if opened is not None:
@@ -115,10 +120,14 @@ def inline_links(doc: Document, number: int, line: str) -> None:
         if depth:
             doc.error(number, "LINK001", "Unclosed inline link destination.")
             continue
-        raw = line[start:end - 1].strip()
+        raw = line[start : end - 1].strip()
         destination = DESTINATION.fullmatch(raw)
         if destination is None:
-            doc.error(number, "LINK002", "Invalid link destination; encode spaces or use <...>.")
+            doc.error(
+                number,
+                "LINK002",
+                "Invalid link destination; encode spaces or use <...>.",
+            )
             continue
         target = destination[1]
         doc.links.append((number, target[1:-1] if target.startswith("<") else target))
@@ -159,11 +168,13 @@ def check_tables(doc: Document) -> None:
         width = len(cells(header))
         if len(cells(line)) != width:
             doc.error(number, "MD007", "Table separator width differs from its header.")
-        for row_number, row in lines[index + 1:]:
+        for row_number, row in lines[index + 1 :]:
             if not row.strip().startswith("|"):
                 break
             if len(cells(row)) != width:
-                doc.error(row_number, "MD007", "Table row width differs from its header.")
+                doc.error(
+                    row_number, "MD007", "Table row width differs from its header."
+                )
 
 
 def parse_document(path: str, text: str) -> Document:
@@ -190,7 +201,9 @@ def check_links(root: Path, doc: Document, documents: dict[str, Document]) -> No
             continue  # Offline lint does not request external URLs.
         decoded = unquote(parts.path)
         if "\\" in decoded or decoded.startswith("/"):
-            doc.error(number, "LINK005", "Use portable relative paths with forward slashes.")
+            doc.error(
+                number, "LINK005", "Use portable relative paths with forward slashes."
+            )
             continue
         target = (root / doc.path).parent / decoded if decoded else root / doc.path
         target = target.resolve()
@@ -202,11 +215,17 @@ def check_links(root: Path, doc: Document, documents: dict[str, Document]) -> No
             continue
         relative = target.relative_to(root).as_posix()
         if not exact_case(root, relative):
-            doc.error(number, "LINK008", f"Link path has incorrect casing: {destination}.")
+            doc.error(
+                number, "LINK008", f"Link path has incorrect casing: {destination}."
+            )
         if parts.fragment and target.suffix.lower() == ".md":
             linked = documents.get(relative)
             if linked is None:
-                doc.error(number, "LINK009", f"Linked Markdown could not be checked: {relative}.")
+                doc.error(
+                    number,
+                    "LINK009",
+                    f"Linked Markdown could not be checked: {relative}.",
+                )
             elif unquote(parts.fragment) not in linked.anchors:
                 doc.error(number, "LINK010", f"Missing heading/anchor: {destination}.")
 

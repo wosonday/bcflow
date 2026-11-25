@@ -244,15 +244,12 @@ def test_precip_post_extreme_values_runs_end_to_end(toy_config):
     result = out["results"]["precip"]
     assert result is not None
     assert any(
-        c.name == "post:precip:extreme_values" and c.status == "pass"
-        for c in out["qa"]
+        c.name == "post:precip:extreme_values" and c.status == "pass" for c in out["qa"]
     )
     assert float(result["scen"].min()) >= 0.0
     assert bool(np.isfinite(result["scen"]).all())
     assert result["evaluation"] is not None
-    assert np.isfinite(
-        result["evaluation"].select_dtypes("number").to_numpy()
-    ).all()
+    assert np.isfinite(result["evaluation"].select_dtypes("number").to_numpy()).all()
 
 
 def test_invalid_post_method_fails_only_that_variable(toy_config):
@@ -263,8 +260,7 @@ def test_invalid_post_method_fails_only_that_variable(toy_config):
 
     assert out["results"]["tmax"] is None and out["results"]["precip"] is not None
     assert any(
-        c.name == "post:tmax:invalid_family" and c.status == "fail"
-        for c in out["qa"]
+        c.name == "post:tmax:invalid_family" and c.status == "fail" for c in out["qa"]
     )
 
 

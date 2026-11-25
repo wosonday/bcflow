@@ -58,7 +58,12 @@ from .preprocess import SEED, ZeroHandling
 from .progress import RunControl
 from .qa import QACheck
 from .regrid import TargetGrid, model_box, regrid_to_points
-from .resources import WorkerPool, estimate_task_bytes, method_memory_factor, select_workers
+from .resources import (
+    WorkerPool,
+    estimate_task_bytes,
+    method_memory_factor,
+    select_workers,
+)
 from .timeaxis import align_daily
 from .units import harmonize
 from .variables import VariableSpec, resolve_method_params
@@ -119,7 +124,12 @@ def run_variable(
     )
     plan = _build_plan(cfg, spec)
     if cfg.grid is not None:
-        return cast(dict, _run_grid(cfg, [spec.name], {spec.name: spec}, qa, control=control, plan=plan))
+        return cast(
+            dict,
+            _run_grid(
+                cfg, [spec.name], {spec.name: spec}, qa, control=control, plan=plan
+            ),
+        )
     return _run_station(cfg, spec, qa, control=control, plan=plan)
 
 
@@ -150,10 +160,16 @@ def run_target(
 
     if len(target.variables) == 1 and method.min_vars == 1:
         v = target.variables[0]
-        spec = replace(cfg.spec(v), method=target.method, group=target.group, window=target.window)
+        spec = replace(
+            cfg.spec(v), method=target.method, group=target.group, window=target.window
+        )
         plan = _build_target_plan(target, {v: spec})
         if cfg.grid is not None:
-            return {v: cast(dict, _run_grid(cfg, [v], {v: spec}, qa, control=control, plan=plan))}
+            return {
+                v: cast(
+                    dict, _run_grid(cfg, [v], {v: spec}, qa, control=control, plan=plan)
+                )
+            }
         return {v: _run_station(cfg, spec, qa, control=control, plan=plan)}
 
     specs = {v: cfg.spec(v) for v in target.variables}
@@ -161,7 +177,15 @@ def run_target(
     if cfg.grid is not None:
         return cast(
             dict[str, dict],
-            _run_grid(cfg, list(target.variables), specs, qa, control=control, plan=plan, target_cfg=target),
+            _run_grid(
+                cfg,
+                list(target.variables),
+                specs,
+                qa,
+                control=control,
+                plan=plan,
+                target_cfg=target,
+            ),
         )
     return _run_target_station(cfg, target, specs, qa, control=control, plan=plan)
 
@@ -178,8 +202,18 @@ def _load_station_series(
     control.progress(variable, "loading_reference")
     ref = load_station_variable(cfg.stations, variable, spec.units, qa)  # type: ignore[arg-type]
     # Early warning, before the (slow) model files are opened.
-    check_coverage(ref, cfg.periods.calibration, qa, name=variable, min_coverage=cfg.periods.min_coverage)
-    grid = {"lat_name": model.lat_name, "lon_name": model.lon_name, "search_radius": model.search_radius}
+    check_coverage(
+        ref,
+        cfg.periods.calibration,
+        qa,
+        name=variable,
+        min_coverage=cfg.periods.min_coverage,
+    )
+    grid = {
+        "lat_name": model.lat_name,
+        "lon_name": model.lon_name,
+        "search_radius": model.search_radius,
+    }
     control.progress(variable, "loading_model", source="hist")
     hist_field = _reference_years(load_model_variable(model, "hist", variable, qa), ref)
     control.progress(variable, "extracting", source="hist")
@@ -233,9 +267,18 @@ def _run_target_station(
         target.name, list(target.variables), ref_by_var, hist_by_var, sim_by_var, qa
     )
     part = _run_cell_and_evaluate(
-        cfg, target.name, list(target.variables), specs,
-        ref_by_var, hist_by_var, sim_by_var, units, qa,
-        compact=False, control=control, plan=plan,
+        cfg,
+        target.name,
+        list(target.variables),
+        specs,
+        ref_by_var,
+        hist_by_var,
+        sim_by_var,
+        units,
+        qa,
+        compact=False,
+        control=control,
+        plan=plan,
     )
     control.progress(target.name, "combining")
     results = _finish_target(cfg, target, specs, [part], qa, grid=None)
@@ -281,7 +324,8 @@ def _run_grid(
             ref_v = ref_v.sortby([lat_v, lon_v])
             if v != v0:
                 for axis, coord_v, coord_0 in (
-                    ("latitude", lat_v, lats[v0]), ("longitude", lon_v, lons[v0])
+                    ("latitude", lat_v, lats[v0]),
+                    ("longitude", lon_v, lons[v0]),
                 ):
                     values = np.asarray(ref_v[coord_v].values, dtype=float)
                     expected = np.asarray(references[v0][coord_0].values, dtype=float)
@@ -293,19 +337,29 @@ def _run_grid(
                             f"grid:{label}:axes_mismatch",
                             f"Reference grid {axis} axes differ between '{v0}' and '{v}' "
                             f"for target '{label}' -- see QACheck 'grid:{label}:axes_mismatch'.",
-                            {"target": label, "variables": [v0, v], "axis": axis,
-                             "atol": 1e-6},
+                            {
+                                "target": label,
+                                "variables": [v0, v],
+                                "axis": axis,
+                                "atol": 1e-6,
+                            },
                         )
         has_data_v, valid_v, window_days_v = scan_grid(
             ref_v,
             period=cfg.periods.calibration,
             on_progress=lambda completed, total, var=v: control.progress(
-                var, "scanning_reference", completed=completed, total=total, unit="time steps"
+                var,
+                "scanning_reference",
+                completed=completed,
+                total=total,
+                unit="time steps",
             ),
         )
         references[v], lats[v], lons[v] = ref_v, lat_v, lon_v
         has_data_by_var[v], valid_by_var[v], window_days_by_var[v] = (
-            has_data_v, valid_v, window_days_v
+            has_data_v,
+            valid_v,
+            window_days_v,
         )
 
     has_data = (
@@ -335,7 +389,9 @@ def _run_grid(
     for v in variables:
         report_coverage(
             coverage_table_from_counts(
-                target_grid.ids, valid_by_var[v][target_grid.iy, target_grid.ix], window_days_by_var[v]
+                target_grid.ids,
+                valid_by_var[v][target_grid.iy, target_grid.ix],
+                window_days_by_var[v],
             ),
             window_days_by_var[v] / 365.25,
             qa,
@@ -355,7 +411,11 @@ def _run_grid(
             references[v],
             target_grid,
             on_progress=lambda completed, total, var=v: control.progress(
-                var, "reading_reference", completed=completed, total=total, unit="time steps"
+                var,
+                "reading_reference",
+                completed=completed,
+                total=total,
+                unit="time steps",
             ),
         )
         options = {
@@ -372,7 +432,9 @@ def _run_grid(
             **options,
         )
         control.progress(v, "loading_model", source="sim")
-        sim_all[v] = model_box(load_model_variable(model, "sim", v, qa), target_grid, **options)
+        sim_all[v] = model_box(
+            load_model_variable(model, "sim", v, qa), target_grid, **options
+        )
 
     parts: list[dict] = []
     block_size = grid_cfg.block_size
@@ -425,7 +487,11 @@ def _run_grid(
                         status="warn",
                         message="One block exceeds the estimated RAM budget, or available RAM could not be determined. "
                         "Using one worker; reduce grid.block_size if memory is tight. Estimates do not guarantee against out-of-memory errors.",
-                        context={ctx_key: label, "estimated_task_bytes": estimated_bytes, "budget_bytes": selection.budget_bytes},
+                        context={
+                            ctx_key: label,
+                            "estimated_task_bytes": estimated_bytes,
+                            "budget_bytes": selection.budget_bytes,
+                        },
                     )
                 )
                 warned_memory = True
@@ -448,51 +514,123 @@ def _run_grid(
                 sim_block: dict[str, xr.DataArray] = {}
                 for v in variables:
                     spec, opts = specs[v], options_by_var[v]
-                    control.progress(v, "extracting", source="reference", **block_context)
+                    control.progress(
+                        v, "extracting", source="reference", **block_context
+                    )
                     ref_block[v] = load_grid_points(
-                        references[v], block, v,
-                        values=None if cells[v] is None else cells[v][:, block_start : block_start + block.size],
+                        references[v],
+                        block,
+                        v,
+                        values=None
+                        if cells[v] is None
+                        else cells[v][:, block_start : block_start + block.size],
                     )
                     control.progress(v, "regridding", source="hist", **block_context)
                     hist_block[v] = _clip(
-                        regrid_to_points(hist_all[v], block, block_qa, source_label=f"{v}:hist", **opts), spec
+                        regrid_to_points(
+                            hist_all[v],
+                            block,
+                            block_qa,
+                            source_label=f"{v}:hist",
+                            **opts,
+                        ),
+                        spec,
                     )
                     control.progress(v, "regridding", source="sim", **block_context)
                     sim_block[v] = _clip(
-                        regrid_to_points(sim_all[v], block, block_qa, source_label=f"{v}:sim", **opts), spec
+                        regrid_to_points(
+                            sim_all[v], block, block_qa, source_label=f"{v}:sim", **opts
+                        ),
+                        spec,
                     )
                 contexts.append(block_context)
                 if target_cfg is None:
                     if selection.workers == 1:
                         part = _correct(
-                            cfg, specs[v0], ref_block[v0], hist_block[v0], sim_block[v0],
-                            block_qa, compact=True, control=control, block_context=block_context, plan=plan,
+                            cfg,
+                            specs[v0],
+                            ref_block[v0],
+                            hist_block[v0],
+                            sim_block[v0],
+                            block_qa,
+                            compact=True,
+                            control=control,
+                            block_context=block_context,
+                            plan=plan,
                         )
                         batch_parts.append((part, block_qa))
                     else:
                         # Only materialized arrays go to workers, never open files or CLI callbacks.
-                        tasks.append(delayed(_correct_block_task)(cfg, specs[v0], ref_block[v0], hist_block[v0], sim_block[v0], block_qa, plan))
+                        tasks.append(
+                            delayed(_correct_block_task)(
+                                cfg,
+                                specs[v0],
+                                ref_block[v0],
+                                hist_block[v0],
+                                sim_block[v0],
+                                block_qa,
+                                plan,
+                            )
+                        )
                 elif selection.workers == 1:
                     part = _correct_target_block(
-                        cfg, target_cfg, specs, ref_block, hist_block, sim_block,
-                        block_qa, compact=True, control=control, block_context=block_context, plan=plan,
+                        cfg,
+                        target_cfg,
+                        specs,
+                        ref_block,
+                        hist_block,
+                        sim_block,
+                        block_qa,
+                        compact=True,
+                        control=control,
+                        block_context=block_context,
+                        plan=plan,
                     )
                     batch_parts.append((part, block_qa))
                 else:
-                    tasks.append(delayed(_correct_target_block_task)(cfg, target_cfg, specs, ref_block, hist_block, sim_block, block_qa, plan))
+                    tasks.append(
+                        delayed(_correct_target_block_task)(
+                            cfg,
+                            target_cfg,
+                            specs,
+                            ref_block,
+                            hist_block,
+                            sim_block,
+                            block_qa,
+                            plan,
+                        )
+                    )
 
             if tasks:
-                control.progress(label, "training_and_adjusting", **contexts[-1], active_blocks=len(tasks))
-                batch_parts = list(compute(*tasks, scheduler="processes", pool=pool.get(selection.workers), chunksize=1))
+                control.progress(
+                    label,
+                    "training_and_adjusting",
+                    **contexts[-1],
+                    active_blocks=len(tasks),
+                )
+                batch_parts = list(
+                    compute(
+                        *tasks,
+                        scheduler="processes",
+                        pool=pool.get(selection.workers),
+                        chunksize=1,
+                    )
+                )
             control.check_cancelled()
             for context, (part, block_qa) in zip(contexts, batch_parts, strict=True):
                 parts.append(part)
                 qa.extend(
-                    c for c in block_qa
-                    if not c.name.startswith("bounds:") and (context["block_index"] == 1 or c.status != "pass")
+                    c
+                    for c in block_qa
+                    if not c.name.startswith("bounds:")
+                    and (context["block_index"] == 1 or c.status != "pass")
                 )
                 completed_cells += context["block_cells"]
-                control.progress(label, "block_finished", **{**context, "completed_cells": completed_cells})
+                control.progress(
+                    label,
+                    "block_finished",
+                    **{**context, "completed_cells": completed_cells},
+                )
             # Release prepared inputs before measuring the next batch's free RAM.
             del tasks, batch_parts
             ref_block = hist_block = sim_block = {}
@@ -500,7 +638,9 @@ def _run_grid(
 
     control.progress(label, "combining")
     if target_cfg is None:
-        result: dict | dict[str, dict] = _finish(cfg, specs[v0], parts, qa, grid=target_grid)
+        result: dict | dict[str, dict] = _finish(
+            cfg, specs[v0], parts, qa, grid=target_grid
+        )
     else:
         result = _finish_target(cfg, target_cfg, specs, parts, qa, grid=target_grid)
     control.check_cancelled()
@@ -539,7 +679,15 @@ def _correct_target_block_task(
 ) -> tuple[dict, list[QACheck]]:
     """Run one multivariate block in a worker process; return only pickle-safe state."""
     part = _correct_target_block(
-        cfg, target, specs, ref_by_var, hist_by_var, sim_by_var, block_qa, compact=True, plan=plan
+        cfg,
+        target,
+        specs,
+        ref_by_var,
+        hist_by_var,
+        sim_by_var,
+        block_qa,
+        compact=True,
+        plan=plan,
     )
     return _strip_adj_for_ipc(part), block_qa
 
@@ -575,7 +723,12 @@ def _harmonize_and_align(
     hist_by_var: dict[str, xr.DataArray],
     sim_by_var: dict[str, xr.DataArray],
     qa: list[QACheck],
-) -> tuple[dict[str, xr.DataArray], dict[str, xr.DataArray], dict[str, xr.DataArray], dict[str, str]]:
+) -> tuple[
+    dict[str, xr.DataArray],
+    dict[str, xr.DataArray],
+    dict[str, xr.DataArray],
+    dict[str, str],
+]:
     """Harmonize units and align daily time axes for every variable."""
     aligned_ref, aligned_hist, aligned_sim, units = {}, {}, {}, {}
     for v in variables:
@@ -583,7 +736,12 @@ def _harmonize_and_align(
             ref_by_var[v], hist_by_var[v], sim_by_var[v], specs[v].units, qa, name=v
         )
         ref_v, hist_v, sim_v = align_daily(ref_v, hist_v, sim_v, qa, name=v)
-        aligned_ref[v], aligned_hist[v], aligned_sim[v], units[v] = ref_v, hist_v, sim_v, unit_v
+        aligned_ref[v], aligned_hist[v], aligned_sim[v], units[v] = (
+            ref_v,
+            hist_v,
+            sim_v,
+            unit_v,
+        )
     return aligned_ref, aligned_hist, aligned_sim, units
 
 
@@ -602,9 +760,13 @@ def _finalize_cell_part(
     control: RunControl,
 ) -> dict:
     """Optionally cast outputs to float32, materialize lazy arrays, and build part."""
-    scen_by_var = {v: (scen_ds[v].astype("float32") if compact else scen_ds[v]) for v in variables}
+    scen_by_var = {
+        v: (scen_ds[v].astype("float32") if compact else scen_ds[v]) for v in variables
+    }
     if compact:
-        series_by_var = {v: [s.astype("float32") for s in series_by_var[v]] for v in variables}
+        series_by_var = {
+            v: [s.astype("float32") for s in series_by_var[v]] for v in variables
+        }
     control.check_cancelled()
     # Accessing .values for QA computes lazy arrays but does not retain them.
     for v in variables:
@@ -645,28 +807,60 @@ def _run_cell_and_evaluate(
     """Slice calibration period, execute run_cell, evaluate, and finalize the part dict."""
     context = block_context or {}
     calibration = cfg.periods.calibration
-    ref_cal = {v: _calibration_slice(ref_by_var[v], calibration, qa, label=f"{v}:ref") for v in variables}
-    hist_cal = {v: _calibration_slice(hist_by_var[v], calibration, qa, label=f"{v}:hist") for v in variables}
+    ref_cal = {
+        v: _calibration_slice(ref_by_var[v], calibration, qa, label=f"{v}:ref")
+        for v in variables
+    }
+    hist_cal = {
+        v: _calibration_slice(hist_by_var[v], calibration, qa, label=f"{v}:hist")
+        for v in variables
+    }
     ref_cal_ds, hist_cal_ds = xr.Dataset(ref_cal), xr.Dataset(hist_cal)
     sim_ds = xr.Dataset({v: sim_by_var[v] for v in variables})
 
     control.progress(progress_label, "training", **context)
     res = run_cell(
-        plan, ref=ref_cal_ds, hist=hist_cal_ds, sim=sim_ds,
-        specs=specs, units=units, control=control, seed=_SEED, qa=qa,
+        plan,
+        ref=ref_cal_ds,
+        hist=hist_cal_ds,
+        sim=sim_ds,
+        specs=specs,
+        units=units,
+        control=control,
+        seed=_SEED,
+        qa=qa,
     )
     control.progress(progress_label, "adjustment", **context)
     adj = res.trained_obj
 
     control.progress(progress_label, "evaluation", **context)
     tables_by_var, series_by_var = _evaluate_block(
-        variables, specs, cfg.periods, plan, adj, res.zeros,
-        ref_by_var, hist_by_var, ref_cal_ds, hist_cal_ds, units, qa,
+        variables,
+        specs,
+        cfg.periods,
+        plan,
+        adj,
+        res.zeros,
+        ref_by_var,
+        hist_by_var,
+        ref_cal_ds,
+        hist_cal_ds,
+        units,
+        qa,
         post_trained=res.post_trained,
     )
     return _finalize_cell_part(
-        variables, res.scen, sim_ds, adj, tables_by_var, series_by_var,
-        units, _span(ref_cal[variables[0]]), res.clip_counts, compact=compact, control=control,
+        variables,
+        res.scen,
+        sim_ds,
+        adj,
+        tables_by_var,
+        series_by_var,
+        units,
+        _span(ref_cal[variables[0]]),
+        res.clip_counts,
+        compact=compact,
+        control=control,
     )
 
 
@@ -699,8 +893,19 @@ def _correct(
         [v], {v: spec}, {v: ref}, {v: hist}, {v: sim}, qa
     )
     part = _run_cell_and_evaluate(
-        cfg, v, [v], {v: spec}, aligned_ref, aligned_hist, aligned_sim, units, qa,
-        compact=compact, control=control, block_context=block_context, plan=plan,
+        cfg,
+        v,
+        [v],
+        {v: spec},
+        aligned_ref,
+        aligned_hist,
+        aligned_sim,
+        units,
+        qa,
+        compact=compact,
+        control=control,
+        block_context=block_context,
+        plan=plan,
     )
     return {
         "scen": part["scen"][v],
@@ -741,8 +946,19 @@ def _correct_target_block(
             target.name, variables, aligned_ref, aligned_hist, aligned_sim, qa
         )
     return _run_cell_and_evaluate(
-        cfg, target.name, variables, specs, aligned_ref, aligned_hist, aligned_sim,
-        units, qa, compact=compact, control=control, block_context=block_context, plan=plan,
+        cfg,
+        target.name,
+        variables,
+        specs,
+        aligned_ref,
+        aligned_hist,
+        aligned_sim,
+        units,
+        qa,
+        compact=compact,
+        control=control,
+        block_context=block_context,
+        plan=plan,
     )
 
 
@@ -764,12 +980,16 @@ def _quantile_count(plan: CellPlan) -> int:
             containers.append(base_kws)
         base_kws_vars = params.get("base_kws_vars")
         if isinstance(base_kws_vars, dict):
-            containers.extend(kws for kws in base_kws_vars.values() if isinstance(kws, dict))
+            containers.extend(
+                kws for kws in base_kws_vars.values() if isinstance(kws, dict)
+            )
         for kws in containers:
             quantiles = kws.get("nquantiles")
             if quantiles is not None:
                 counts.append(
-                    int(quantiles) if isinstance(quantiles, (int, np.integer)) else len(quantiles)
+                    int(quantiles)
+                    if isinstance(quantiles, (int, np.integer))
+                    else len(quantiles)
                 )
     return max(counts, default=50)
 
@@ -780,43 +1000,61 @@ def _concat_adj(parts: list[dict]) -> Any | None:
         return None
     if len(parts) == 1:
         return parts[0]["adj"]
-    return _CombinedAdjustment(cast(xr.Dataset, xr.concat([p["adj"].ds for p in parts], dim="station")))
+    return _CombinedAdjustment(
+        cast(xr.Dataset, xr.concat([p["adj"].ds for p in parts], dim="station"))
+    )
 
 
-def _emit_bounds_summary(spec: VariableSpec, n_below: int, n_above: int, qa: list[QACheck]) -> None:
+def _emit_bounds_summary(
+    spec: VariableSpec, n_below: int, n_above: int, qa: list[QACheck]
+) -> None:
     """Emit one summary bounds QACheck across all grid blocks of a variable."""
     low, high = spec.bounds
     if low is None and high is None:
         return
     variable, n_total = spec.name, n_below + n_above
     clip_context = {
-        "variable": variable, "bounds": [low, high],
-        "n_below": n_below, "n_above": n_above, "n_clipped": n_total,
+        "variable": variable,
+        "bounds": [low, high],
+        "n_below": n_below,
+        "n_above": n_above,
+        "n_clipped": n_total,
     }
     if n_total > 0:
-        qa.append(QACheck(
-            name=f"bounds:{variable}:clipped", status="warn",
-            message=f"Clipped {n_total} value(s) of '{variable}' to bounds [{low}, {high}] ({n_below} below, {n_above} above).",
-            context=clip_context,
-        ))
+        qa.append(
+            QACheck(
+                name=f"bounds:{variable}:clipped",
+                status="warn",
+                message=f"Clipped {n_total} value(s) of '{variable}' to bounds [{low}, {high}] ({n_below} below, {n_above} above).",
+                context=clip_context,
+            )
+        )
     else:
-        qa.append(QACheck(
-            name=f"bounds:{variable}:ok", status="pass",
-            message=f"All values of '{variable}' are within bounds [{low}, {high}].",
-            context=clip_context,
-        ))
+        qa.append(
+            QACheck(
+                name=f"bounds:{variable}:ok",
+                status="pass",
+                message=f"All values of '{variable}' are within bounds [{low}, {high}].",
+                context=clip_context,
+            )
+        )
 
 
-def _emit_non_finite_qa(variable: str, non_finite: list[str], unit: str, qa: list[QACheck]) -> None:
+def _emit_non_finite_qa(
+    variable: str, non_finite: list[str], unit: str, qa: list[QACheck]
+) -> None:
     if non_finite:
-        qa.append(QACheck(
-            name=f"adjust:{variable}:non_finite", status="warn",
-            message=(
-                f"The correction of '{variable}' produced NaN/inf where the model had valid values at "
-                f"{len(non_finite)} {unit}(s), e.g. no observation in the calibration period: {non_finite[:10]}"
-            ),
-            context={"variable": variable, "stations": non_finite},
-        ))
+        qa.append(
+            QACheck(
+                name=f"adjust:{variable}:non_finite",
+                status="warn",
+                message=(
+                    f"The correction of '{variable}' produced NaN/inf where the model had valid values at "
+                    f"{len(non_finite)} {unit}(s), e.g. no observation in the calibration period: {non_finite[:10]}"
+                ),
+                context={"variable": variable, "stations": non_finite},
+            )
+        )
 
 
 def _finish_variable(
@@ -837,46 +1075,73 @@ def _finish_variable(
     variable = spec.name
     unit = "cell" if grid is not None else "station"
     scen_pieces = [p["scen"][variable] if per_var else p["scen"] for p in parts]
-    scen = scen_pieces[0] if len(scen_pieces) == 1 else cast(xr.DataArray, xr.concat(scen_pieces, dim="station"))
+    scen = (
+        scen_pieces[0]
+        if len(scen_pieces) == 1
+        else cast(xr.DataArray, xr.concat(scen_pieces, dim="station"))
+    )
 
     if grid is not None:
         n_below = sum(p.get("clip_counts", {}).get(variable, (0, 0))[0] for p in parts)
         n_above = sum(p.get("clip_counts", {}).get(variable, (0, 0))[1] for p in parts)
         _emit_bounds_summary(spec, n_below, n_above, qa)
 
-    non_finite = [s for p in parts for s in (p["non_finite"][variable] if per_var else p["non_finite"])]
+    non_finite = [
+        s
+        for p in parts
+        for s in (p["non_finite"][variable] if per_var else p["non_finite"])
+    ]
     _emit_non_finite_qa(variable, non_finite, unit, qa)
 
     context: dict[str, Any] = {"variable": variable}
     if target_name is not None:
         context["target"] = target_name
-    context.update({
-        "method": method,
-        "group": group,
-        "regrid": spec.regrid if grid is not None else None,
-        "n_stations": int(scen.sizes.get("station", 0)),
-        "calibration": parts[0]["calibration"],
-        "sim": _span(scen),
-    })
-    qa.append(QACheck(
-        name=f"train_adjust:{variable}:done",
-        status="pass",
-        message=(
-            f"Completed train+adjust for '{variable}' using '{method}' "
-            f"(group={group}{f', window={window}' if group == 'dayofyear' else ''}"
-            + (f", regrid={spec.regrid}, {len(parts)} block(s)" if grid is not None else "")
-            + ")."
-        ),
-        context=context,
-    ))
+    context.update(
+        {
+            "method": method,
+            "group": group,
+            "regrid": spec.regrid if grid is not None else None,
+            "n_stations": int(scen.sizes.get("station", 0)),
+            "calibration": parts[0]["calibration"],
+            "sim": _span(scen),
+        }
+    )
+    qa.append(
+        QACheck(
+            name=f"train_adjust:{variable}:done",
+            status="pass",
+            message=(
+                f"Completed train+adjust for '{variable}' using '{method}' "
+                f"(group={group}{f', window={window}' if group == 'dayofyear' else ''}"
+                + (
+                    f", regrid={spec.regrid}, {len(parts)} block(s)"
+                    if grid is not None
+                    else ""
+                )
+                + ")."
+            ),
+            context=context,
+        )
+    )
 
     var_parts = (
-        [{"tables": p["tables"][variable], "series": p["series"][variable]} for p in parts]
+        [
+            {"tables": p["tables"][variable], "series": p["series"][variable]}
+            for p in parts
+        ]
         if per_var
         else parts
     )
-    evaluation, hist_eval = _summarize_evaluation(spec, cfg.periods, var_parts, qa, unit=unit)
-    return {"scen": scen, "adj": adj, "evaluation": evaluation, "hist_eval": hist_eval, "grid": grid}
+    evaluation, hist_eval = _summarize_evaluation(
+        spec, cfg.periods, var_parts, qa, unit=unit
+    )
+    return {
+        "scen": scen,
+        "adj": adj,
+        "evaluation": evaluation,
+        "hist_eval": hist_eval,
+        "grid": grid,
+    }
 
 
 def _finish(
@@ -889,9 +1154,16 @@ def _finish(
 ) -> dict:
     """Put the blocks back together and write the summary checks once."""
     return _finish_variable(
-        cfg, spec, parts, qa,
-        adj=_concat_adj(parts), grid=grid, method=spec.method,
-        group=spec.group, window=spec.window, per_var=False,
+        cfg,
+        spec,
+        parts,
+        qa,
+        adj=_concat_adj(parts),
+        grid=grid,
+        method=spec.method,
+        group=spec.group,
+        window=spec.window,
+        per_var=False,
     )
 
 
@@ -908,9 +1180,17 @@ def _finish_target(
     adj = _concat_adj(parts)
     return {
         v: _finish_variable(
-            cfg, specs[v], parts, qa,
-            adj=adj, grid=grid, method=target.method, group=target.group,
-            window=target.window, target_name=target.name, per_var=True,
+            cfg,
+            specs[v],
+            parts,
+            qa,
+            adj=adj,
+            grid=grid,
+            method=target.method,
+            group=target.group,
+            window=target.window,
+            target_name=target.name,
+            per_var=True,
         )
         for v in target.variables
     }
@@ -929,7 +1209,8 @@ def _check_post_steps(
     for step in post_steps:
         if step.method not in METHODS:
             _fail_qa(
-                qa, f"post:{label}:unknown",
+                qa,
+                f"post:{label}:unknown",
                 f"Post-step method '{step.method}' is not registered. Valid methods: {sorted(METHODS)}.",
                 {ctx_key: label, "method": step.method},
                 exc_msg=f"Invalid post-step method for {noun} '{label}': {step.method!r}",
@@ -938,17 +1219,27 @@ def _check_post_steps(
         if post_spec.family != "post":
             msg = f"Post-step method '{step.method}' must have family 'post', got '{post_spec.family}'."
             _fail_qa(
-                qa, f"post:{label}:invalid_family", msg,
+                qa,
+                f"post:{label}:invalid_family",
+                msg,
                 {ctx_key: label, "method": step.method, "family": post_spec.family},
                 exc_msg=msg,
             )
         try:
             check_available(post_spec)
         except ValueError as exc:
-            qa.append(QACheck(
-                name=f"post:{label}:unavailable", status="fail", message=str(exc),
-                context={ctx_key: label, "method": step.method, "extra": post_spec.extra},
-            ))
+            qa.append(
+                QACheck(
+                    name=f"post:{label}:unavailable",
+                    status="fail",
+                    message=str(exc),
+                    context={
+                        ctx_key: label,
+                        "method": step.method,
+                        "extra": post_spec.extra,
+                    },
+                )
+            )
             raise
 
 
@@ -967,9 +1258,14 @@ def _validate_primary_method(
     noun = "target" if is_target else "variable"
     var_list = list(variables)
     if method_name not in METHODS:
-        ctx = {"target": label, "method": method_name} if is_target else {"variable": label}
+        ctx = (
+            {"target": label, "method": method_name}
+            if is_target
+            else {"variable": label}
+        )
         _fail_qa(
-            qa, f"method:{label}:unknown",
+            qa,
+            f"method:{label}:unknown",
             f"Method '{method_name}' is not registered. Valid methods: {sorted(METHODS)}.",
             ctx,
             exc_msg=f"Invalid method for {noun} '{label}': {method_name!r}",
@@ -983,7 +1279,9 @@ def _validate_primary_method(
             else f"Method '{method_name}' has family 'post' and is only valid in 'post:' (Phase 3)."
         )
         _fail_qa(
-            qa, f"method:{label}:invalid_family", msg,
+            qa,
+            f"method:{label}:invalid_family",
+            msg,
             {ctx_key: label, "method": method_name, "family": method.family},
             exc_msg=f"Method '{method_name}' has family 'post' and cannot be used as a primary method.",
         )
@@ -991,18 +1289,31 @@ def _validate_primary_method(
     if len(var_list) < method.min_vars:
         if is_target:
             min_msg = f"Method '{method_name}' requires at least {method.min_vars} variable(s), got {len(var_list)}."
-            min_ctx: dict[str, Any] = {"target": label, "method": method_name, "min_vars": method.min_vars, "n_vars": len(var_list)}
+            min_ctx: dict[str, Any] = {
+                "target": label,
+                "method": method_name,
+                "min_vars": method.min_vars,
+                "n_vars": len(var_list),
+            }
         else:
             min_msg = f"Method '{method_name}' requires at least {method.min_vars} variables and needs 'targets:' (Phase 4)."
-            min_ctx = {"variable": label, "method": method_name, "min_vars": method.min_vars}
+            min_ctx = {
+                "variable": label,
+                "method": method_name,
+                "min_vars": method.min_vars,
+            }
         _fail_qa(
-            qa, f"method:{label}:min_vars", min_msg, min_ctx,
+            qa,
+            f"method:{label}:min_vars",
+            min_msg,
+            min_ctx,
             exc_msg=f"Method '{method_name}' requires at least {method.min_vars} variables.",
         )
 
     if is_target and len(var_list) > 1 and method.min_vars == 1:
         _fail_qa(
-            qa, f"method:{label}:univariate_only",
+            qa,
+            f"method:{label}:univariate_only",
             f"Method '{method_name}' is univariate and cannot be applied to multiple variables {var_list}.",
             {"target": label, "method": method_name, "variables": var_list},
             exc_msg=f"Method '{method_name}' is univariate and cannot be used with multiple variables.",
@@ -1010,22 +1321,34 @@ def _validate_primary_method(
 
     if is_target and method_name == "mbcn" and group != "none":
         _fail_qa(
-            qa, f"method:{label}:group", "Method 'mbcn' requires group='none'.",
+            qa,
+            f"method:{label}:group",
+            "Method 'mbcn' requires group='none'.",
             {"target": label, "method": method_name, "group": group},
             exc_msg="Method 'mbcn' requires group='none'.",
         )
 
     if is_target and not method.supports_projection:
         msg = f"Method '{method_name}' does not support projection onto future 'sim'."
-        _fail_qa(qa, f"method:{label}:no_projection", msg, {"target": label, "method": method_name}, exc_msg=msg)
+        _fail_qa(
+            qa,
+            f"method:{label}:no_projection",
+            msg,
+            {"target": label, "method": method_name},
+            exc_msg=msg,
+        )
 
     try:
         check_available(method)
     except ValueError as exc:
-        qa.append(QACheck(
-            name=f"method:{label}:unavailable", status="fail", message=str(exc),
-            context={ctx_key: label, "method": method_name, "extra": method.extra},
-        ))
+        qa.append(
+            QACheck(
+                name=f"method:{label}:unavailable",
+                status="fail",
+                message=str(exc),
+                context={ctx_key: label, "method": method_name, "extra": method.extra},
+            )
+        )
         raise
 
     _check_post_steps(label, post, qa, is_target=is_target)
@@ -1034,7 +1357,11 @@ def _validate_primary_method(
 
 def _build_post_steps(post: list[PostConfig]) -> tuple[PostStep, ...]:
     return tuple(
-        PostStep(method=p.method, train_params=tuple(p.train_params.items()), adjust_params=tuple(p.adjust_params.items()))
+        PostStep(
+            method=p.method,
+            train_params=tuple(p.train_params.items()),
+            adjust_params=tuple(p.adjust_params.items()),
+        )
         for p in post
     )
 
@@ -1060,17 +1387,24 @@ def _build_plan(cfg: PipelineConfig, spec: VariableSpec) -> CellPlan:
     )
 
 
-def _build_target_plan(target: TargetConfig, specs: dict[str, VariableSpec]) -> CellPlan:
+def _build_target_plan(
+    target: TargetConfig, specs: dict[str, VariableSpec]
+) -> CellPlan:
     meta = get_method_meta(target.method)
     if len(target.variables) == 1 and meta.min_vars == 1:
         train_params, adjust_params = resolve_method_params(
             specs[target.variables[0]],
             meta,
             explicit_train=dict(target.train_params) if target.train_params else None,
-            explicit_adjust=dict(target.adjust_params) if target.adjust_params else None,
+            explicit_adjust=dict(target.adjust_params)
+            if target.adjust_params
+            else None,
         )
     else:
-        train_params, adjust_params = dict(target.train_params), dict(target.adjust_params)
+        train_params, adjust_params = (
+            dict(target.train_params),
+            dict(target.adjust_params),
+        )
     return CellPlan(
         target_name=target.name,
         variables=tuple(target.variables),
@@ -1107,16 +1441,27 @@ def _intersect_target_station_data(
         or len(common_stations) != len(hist_set)
         or len(common_stations) != len(sim_set)
     ):
-        aligned_ref = {v: da.sel(station=common_stations) for v, da in aligned_ref.items()}
-        aligned_hist = {v: da.sel(station=common_stations) for v, da in aligned_hist.items()}
-        aligned_sim = {v: da.sel(station=common_stations) for v, da in aligned_sim.items()}
+        aligned_ref = {
+            v: da.sel(station=common_stations) for v, da in aligned_ref.items()
+        }
+        aligned_hist = {
+            v: da.sel(station=common_stations) for v, da in aligned_hist.items()
+        }
+        aligned_sim = {
+            v: da.sel(station=common_stations) for v, da in aligned_sim.items()
+        }
 
     if aligned_ref[v0].sizes["station"] > 0 and aligned_hist[v0].sizes["station"] > 0:
         ref0, hist0 = xr.align(aligned_ref[v0], aligned_hist[v0], join="inner")
-        if ref0.sizes["time"] != aligned_ref[v0].sizes["time"] or hist0.sizes["time"] != aligned_hist[v0].sizes["time"]:
+        if (
+            ref0.sizes["time"] != aligned_ref[v0].sizes["time"]
+            or hist0.sizes["time"] != aligned_hist[v0].sizes["time"]
+        ):
             common_time = ref0["time"].values
             aligned_ref = {v: da.sel(time=common_time) for v, da in aligned_ref.items()}
-            aligned_hist = {v: da.sel(time=common_time) for v, da in aligned_hist.items()}
+            aligned_hist = {
+                v: da.sel(time=common_time) for v, da in aligned_hist.items()
+            }
 
     kept_set = set(common_stations)
     all_dropped: list[str] = []
@@ -1125,13 +1470,21 @@ def _intersect_target_station_data(
             all_dropped.append(s)
 
     n_stations = len(common_stations)
-    n_ref_time, n_sim_time = int(aligned_ref[v0].sizes["time"]), int(aligned_sim[v0].sizes["time"])
+    n_ref_time, n_sim_time = (
+        int(aligned_ref[v0].sizes["time"]),
+        int(aligned_sim[v0].sizes["time"]),
+    )
     if n_stations == 0:
         _fail_qa(
             qa,
             f"target:{target_name}:station_intersection",
             f"Target '{target_name}' has 0 common stations across variables {variables} (dropped: {all_dropped[:10]}).",
-            {"target": target_name, "variables": variables, "dropped_stations": all_dropped, "n_common_stations": 0},
+            {
+                "target": target_name,
+                "variables": variables,
+                "dropped_stations": all_dropped,
+                "n_common_stations": 0,
+            },
             exc_msg=f"Target '{target_name}' has 0 common stations across {variables}.",
         )
     if n_ref_time == 0 or n_sim_time == 0:
@@ -1139,19 +1492,31 @@ def _intersect_target_station_data(
             qa,
             f"target:{target_name}:time_intersection",
             f"Target '{target_name}' has 0 common time steps across variables {variables}.",
-            {"target": target_name, "variables": variables, "n_ref_time": n_ref_time, "n_sim_time": n_sim_time},
+            {
+                "target": target_name,
+                "variables": variables,
+                "n_ref_time": n_ref_time,
+                "n_sim_time": n_sim_time,
+            },
             exc_msg=f"Target '{target_name}' has 0 common time steps across {variables}.",
         )
     if all_dropped:
-        qa.append(QACheck(
-            name=f"target:{target_name}:station_intersection",
-            status="warn",
-            message=(
-                f"Target '{target_name}': dropped {len(all_dropped)} station(s) not present across all "
-                f"variables {variables}; continuing with {n_stations} common station(s): {all_dropped[:10]}"
-            ),
-            context={"target": target_name, "variables": variables, "dropped_stations": all_dropped, "n_common_stations": n_stations},
-        ))
+        qa.append(
+            QACheck(
+                name=f"target:{target_name}:station_intersection",
+                status="warn",
+                message=(
+                    f"Target '{target_name}': dropped {len(all_dropped)} station(s) not present across all "
+                    f"variables {variables}; continuing with {n_stations} common station(s): {all_dropped[:10]}"
+                ),
+                context={
+                    "target": target_name,
+                    "variables": variables,
+                    "dropped_stations": all_dropped,
+                    "n_common_stations": n_stations,
+                },
+            )
+        )
     return aligned_ref, aligned_hist, aligned_sim
 
 
@@ -1182,52 +1547,89 @@ def _evaluate_block(
     series_by_var: dict[str, list[xr.Dataset]] = {v: [] for v in variables}
 
     for label, period in _evaluation_periods(periods):
-        if method.family == "adjust_only" and not method.supports_projection and label == "validation":
+        if (
+            method.family == "adjust_only"
+            and not method.supports_projection
+            and label == "validation"
+        ):
             for v in variables:
-                qa.append(QACheck(
-                    name=f"evaluation:{v}:validation:skipped", status="warn",
-                    message=(
-                        f"Evaluation of the validation period skipped for '{v}': "
-                        f"method '{plan.method}' does not support out-of-sample projection."
-                    ),
-                    context={"variable": v, "period_label": label},
-                ))
+                qa.append(
+                    QACheck(
+                        name=f"evaluation:{v}:validation:skipped",
+                        status="warn",
+                        message=(
+                            f"Evaluation of the validation period skipped for '{v}': "
+                            f"method '{plan.method}' does not support out-of-sample projection."
+                        ),
+                        context={"variable": v, "period_label": label},
+                    )
+                )
             continue
         try:
             obs_slice = {v: _slice(ref_by_var[v], period) for v in variables}
             raw_slice = {v: _slice(hist_by_var[v], period) for v in variables}
-            if any(obs_slice[v].sizes["time"] == 0 or raw_slice[v].sizes["time"] == 0 for v in variables):
+            if any(
+                obs_slice[v].sizes["time"] == 0 or raw_slice[v].sizes["time"] == 0
+                for v in variables
+            ):
                 where = f"{period[0]}..{period[1]}" if period else "the common period"
                 raise ValueError(f"no reference or model data in {where}")
             raw_ds = xr.Dataset(raw_slice)
             if method.family == "train_adjust":
                 corrected_ds = adjust_trained(
-                    plan, adj, sim=raw_ds, ref=ref_cal_ds, hist=hist_cal_ds,
-                    specs=specs, units=units, zeros=zeros, post_trained=post_trained,
+                    plan,
+                    adj,
+                    sim=raw_ds,
+                    ref=ref_cal_ds,
+                    hist=hist_cal_ds,
+                    specs=specs,
+                    units=units,
+                    zeros=zeros,
+                    post_trained=post_trained,
                 )
             else:
-                eval_plan = plan if method.supports_projection else replace(plan, has_projection=False)
+                eval_plan = (
+                    plan
+                    if method.supports_projection
+                    else replace(plan, has_projection=False)
+                )
                 corrected_ds = run_cell(
-                    eval_plan, ref=ref_cal_ds, hist=hist_cal_ds, sim=raw_ds,
-                    specs=specs, units=units, seed=_SEED, qa=[],
+                    eval_plan,
+                    ref=ref_cal_ds,
+                    hist=hist_cal_ds,
+                    sim=raw_ds,
+                    specs=specs,
+                    units=units,
+                    seed=_SEED,
+                    qa=[],
                 ).scen
 
             for v in variables:
                 obs_v, raw_v, corrected_v = obs_slice[v], raw_slice[v], corrected_ds[v]
                 obs_paired = obs_on_model_dates(obs_v, raw_v)
                 tables_by_var[v][label] = evaluate(
-                    obs_v, raw_v, corrected_v,
+                    obs_v,
+                    raw_v,
+                    corrected_v,
                     wet_thresh=_wet_threshold(specs[v], units[v]),
-                    period=label, obs_paired=obs_paired,
+                    period=label,
+                    obs_paired=obs_paired,
                 )
-                series_by_var[v].append(paired_series(obs_v, raw_v, corrected_v, period=label, obs_paired=obs_paired))
+                series_by_var[v].append(
+                    paired_series(
+                        obs_v, raw_v, corrected_v, period=label, obs_paired=obs_paired
+                    )
+                )
         except Exception as exc:  # noqa: BLE001 -- isolate evaluation from the correction itself
             for v in variables:
-                qa.append(QACheck(
-                    name=f"evaluation:{v}:{label}:skipped", status="warn",
-                    message=f"Evaluation of the {label} period skipped for '{v}': {exc}",
-                    context={"variable": v, "period_label": label},
-                ))
+                qa.append(
+                    QACheck(
+                        name=f"evaluation:{v}:{label}:skipped",
+                        status="warn",
+                        message=f"Evaluation of the {label} period skipped for '{v}': {exc}",
+                        context={"variable": v, "period_label": label},
+                    )
+                )
     return tables_by_var, series_by_var
 
 
@@ -1255,7 +1657,9 @@ def _span(da: xr.DataArray) -> dict:
     }
 
 
-def _calibration_slice(da: xr.DataArray, period, qa: list[QACheck], *, label: str) -> xr.DataArray:
+def _calibration_slice(
+    da: xr.DataArray, period, qa: list[QACheck], *, label: str
+) -> xr.DataArray:
     out = _slice(da, period)
     if out.sizes["time"] == 0:
         available = _span(da)
@@ -1263,7 +1667,11 @@ def _calibration_slice(da: xr.DataArray, period, qa: list[QACheck], *, label: st
             qa,
             f"periods:{label}:calibration_empty",
             f"No {label} data in the calibration period {period[0]}..{period[1]} (data covers {available['start']}..{available['end']}).",
-            {"variable": label.split(":")[0], "period": list(period), "available": available},
+            {
+                "variable": label.split(":")[0],
+                "period": list(period),
+                "available": available,
+            },
             exc_msg=f"No {label} data in the calibration period -- see QACheck 'periods:{label}:calibration_empty'.",
         )
     return out
@@ -1274,14 +1682,20 @@ def _wet_threshold(spec: VariableSpec, units: str) -> float | None:
     if spec.name != "precip" or not units:
         return None
     try:
-        return float(convert_units_to(spec.adapt_freq_thresh or _DEFAULT_WET_DAY, units))
+        return float(
+            convert_units_to(spec.adapt_freq_thresh or _DEFAULT_WET_DAY, units)
+        )
     except pint.PintError:
         return None
 
 
-def _evaluation_periods(periods: PeriodsConfig) -> list[tuple[str, tuple[str, str] | None]]:
+def _evaluation_periods(
+    periods: PeriodsConfig,
+) -> list[tuple[str, tuple[str, str] | None]]:
     """Calibration always (None = all common data), validation when set."""
-    out: list[tuple[str, tuple[str, str] | None]] = [("calibration", periods.calibration)]
+    out: list[tuple[str, tuple[str, str] | None]] = [
+        ("calibration", periods.calibration)
+    ]
     if periods.validation is not None:
         out.append(("validation", periods.validation))
     return out
@@ -1307,17 +1721,28 @@ def _summarize_evaluation(
             all_tables.append(table)
 
     if periods.validation is None:
-        qa.append(QACheck(
-            name=f"evaluation:{name}:in_sample", status="warn",
-            message=(
-                f"No validation period set for '{name}': only the calibration period was evaluated, "
-                "and those scores are in-sample (optimistic). Set periods.validation for an independent check."
-            ),
-            context={"variable": name},
-        ))
+        qa.append(
+            QACheck(
+                name=f"evaluation:{name}:in_sample",
+                status="warn",
+                message=(
+                    f"No validation period set for '{name}': only the calibration period was evaluated, "
+                    "and those scores are in-sample (optimistic). Set periods.validation for an independent check."
+                ),
+                context={"variable": name},
+            )
+        )
 
     if not all_tables:
         return None, None
-    per_block = [cast(xr.Dataset, xr.concat(p["series"], dim="time")).sortby("time") for p in parts if p["series"]]
-    hist_eval = per_block[0] if len(per_block) == 1 else cast(xr.Dataset, xr.concat(per_block, dim="station"))
+    per_block = [
+        cast(xr.Dataset, xr.concat(p["series"], dim="time")).sortby("time")
+        for p in parts
+        if p["series"]
+    ]
+    hist_eval = (
+        per_block[0]
+        if len(per_block) == 1
+        else cast(xr.Dataset, xr.concat(per_block, dim="station"))
+    )
     return pd.concat(all_tables, ignore_index=True), hist_eval

@@ -106,7 +106,9 @@ def _write_netcdf(
         item.attrs = {key: safe_attr(value) for key, value in item.attrs.items()}
     for name in data.coords:
         coord = data[name]
-        if coord.dtype == object and all(isinstance(v, str) for v in coord.values.ravel()):
+        if coord.dtype == object and all(
+            isinstance(v, str) for v in coord.values.ravel()
+        ):
             data = data.assign_coords({name: coord.astype(str)})
     data.to_netcdf(path)
     return path

@@ -137,7 +137,9 @@ def evaluate(
     the ideal as the raw one (None when a value is missing).
     """
     if obs_paired is None:
-        obs_paired = obs_on_model_dates(obs, raw)  # raw and corrected share one time axis
+        obs_paired = obs_on_model_dates(
+            obs, raw
+        )  # raw and corrected share one time axis
     stats = _obs_stats(obs, wet_thresh)
     before = _metrics(raw, stats, obs_paired, wet_thresh)
     after = _metrics(corrected, stats, obs_paired, wet_thresh)
