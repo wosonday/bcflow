@@ -48,7 +48,7 @@ import numpy as np
 import xarray as xr
 from scipy import sparse
 
-from .extract import _match_lon
+from .extract import _match_lon, _unit_sphere
 from .grouping import resolve_latlon_dims
 from .qa import QACheck
 
@@ -197,14 +197,9 @@ def _bicubic(src: _Source, lat, lon, params):
 def _distance(src: _Source, ii, jj, lat, lon) -> np.ndarray:
     """Chord distance on the unit sphere from each target to its candidate cells."""
 
-    def xyz(a, b):
-        a, b = np.radians(a), np.radians(b)
-        return np.stack(
-            [np.cos(a) * np.cos(b), np.cos(a) * np.sin(b), np.sin(a)], axis=-1
-        )
-
     return np.linalg.norm(
-        xyz(src.lat[ii], src.lon[jj]) - xyz(lat, lon)[:, None, :], axis=-1
+        _unit_sphere(src.lat[ii], src.lon[jj]) - _unit_sphere(lat, lon)[:, None, :],
+        axis=-1,
     )
 
 
@@ -333,6 +328,14 @@ def _apply(data: np.ndarray, weights: sparse.csr_matrix) -> np.ndarray:
     return np.where(den >= 0.5, out, np.nan)
 
 
+def _source_indices(
+    weights: sparse.csr_matrix, nlon: int
+) -> tuple[np.ndarray, np.ndarray]:
+    """Sorted source rows and columns used by the nonzero regrid weights."""
+    used = np.unique(weights.indices)
+    return np.unique(used // nlon), np.unique(used % nlon)
+
+
 def model_box(
     da: xr.DataArray,
     target: TargetGrid,
@@ -357,11 +360,10 @@ def model_box(
     lat_dim: Hashable = da[lat].dims[0]
     lon_dim: Hashable = da[lon].dims[0]
     weights = regrid_weights(da[lat].values, da[lon].values, target, method, params)
-    used = np.unique(weights.indices)
-    if used.size == 0:
-        return da
     nlat, nlon = da.sizes[lat_dim], da.sizes[lon_dim]
-    rows, cols = used // nlon, used % nlon
+    rows, cols = _source_indices(weights, nlon)
+    if rows.size == 0:
+        return da
     r0, r1 = max(int(rows.min()) - _HALO, 0), min(int(rows.max()) + _HALO, nlat - 1)
     c0, c1 = max(int(cols.min()) - _HALO, 0), min(int(cols.max()) + _HALO, nlon - 1)
     if c1 - c0 + 1 > nlon // 2:  # spans the seam (or most of the globe): keep it whole
@@ -394,9 +396,8 @@ def regrid_to_points(
     weights = regrid_weights(da[lat].values, da[lon].values, target, method, params)
 
     # Read only the source rows/columns the weights use (a small box around the targets).
-    used = np.unique(weights.indices)
     nlon = da.sizes[lon_dim]
-    rows, cols = np.unique(used // nlon), np.unique(used % nlon)
+    rows, cols = _source_indices(weights, nlon)
     box = da.isel({lat_dim: rows, lon_dim: cols}).transpose("time", lat_dim, lon_dim)
     values = np.asarray(box.values, dtype=float).reshape(box.sizes["time"], -1)
     # source column index in the full grid -> column in the box
