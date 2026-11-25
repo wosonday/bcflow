@@ -10,7 +10,7 @@ from app import runtime
 from app.runtime import SessionKeys
 from app.services._io import resolve_local_path
 from app.services.config import list_example_configs, load_document, save_copy
-from app.ui.components import render_json_download, render_validation_messages
+from app.ui.components import render_json_download, render_methods_table, render_validation_messages
 from bcflow.discovery import list_methods
 
 
@@ -130,4 +130,4 @@ def render() -> None:
             path = resolve_local_path(input_path, document["base_dir"], resolve=True)
             _start_and_monitor(manager, "inspect", input_path=path)
     with st.expander("Available correction methods"):
-        st.dataframe(list_methods(), hide_index=True, alt="Available bias-correction algorithms")
+        render_methods_table(list_methods())

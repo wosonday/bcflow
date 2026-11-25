@@ -13,6 +13,16 @@ from bcflow.qa import Status
 
 _QA_STATUSES = tuple(get_args(Status))
 _QA_METRIC_LABELS = {"pass": "Passed", "warn": "Warnings", "fail": "Failed"}
+_FAMILY_LABELS = {
+    "train_adjust": "train + adjust",
+    "adjust_only": "adjust only",
+    "post": "post-step only (post:)",
+}
+_METHODS_CAPTION = (
+    "`post-step only (post:)` methods belong under `correction.<var>.post:`, not `method:`. "
+    "Multivariate `2+ (targets:)` methods need a `targets:` entry. "
+    "`Requires POT` methods need `pip install POT`."
+)
 
 
 def show_warning(message: str, exc: Exception | None = None) -> None:
@@ -65,6 +75,37 @@ def render_qa_panel(checks: list[dict], *, alt: str) -> None:
             icon=":material/info:",
         )
     st.dataframe(filtered, hide_index=True, width="stretch", alt=alt)
+
+
+def methods_table_frame(methods: list[dict]) -> pd.DataFrame:
+    """Build the human-readable methods table used by the Configure view."""
+    rows = []
+    for method in methods:
+        min_vars = int(method.get("min_vars", 1))
+        extra = method.get("extra")
+        family = method.get("family", "")
+        rows.append(
+            {
+                "Method": method.get("name", ""),
+                "Family": _FAMILY_LABELS.get(family, str(family)),
+                "Variables": "1 (univariate)" if min_vars == 1 else f"{min_vars}+ (targets:)",
+                "Projection": "Yes" if method.get("supports_projection") else "In-sample only",
+                "Extra": f"Requires {extra}" if extra else "Built-in",
+                "Summary": method.get("summary", ""),
+            }
+        )
+    return pd.DataFrame(
+        rows,
+        columns=["Method", "Family", "Variables", "Projection", "Extra", "Summary"],
+    )
+
+
+def render_methods_table(
+    methods: list[dict], *, alt: str = "Available bias-correction algorithms"
+) -> None:
+    """Render the discovered methods as a tidy badge table with usage guidance."""
+    st.dataframe(methods_table_frame(methods), hide_index=True, width="stretch", alt=alt)
+    st.caption(_METHODS_CAPTION)
 
 
 def render_json_download(

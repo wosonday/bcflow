@@ -13,6 +13,7 @@ from streamlit.testing.v1 import AppTest
 
 from app import runtime
 from app.services.config import config_digest
+from bcflow.discovery import list_methods
 
 pytestmark = pytest.mark.usefixtures("web_component_discovery_cache")
 
@@ -510,3 +511,52 @@ def test_monitor_idle_calls_history_once_and_relative_load_uses_manager_cwd(
     monkeypatch.chdir(other_cwd)
     app = _open(_app(), Path("configs") / config_path.name)
     assert app.session_state["document"]["path"] == str(config_path)
+
+
+def test_methods_table_frame_surfaces_family_variables_projection_and_extras():
+    from app.ui.components import methods_table_frame
+    from bcflow.discovery import list_methods
+
+    frame = methods_table_frame(list_methods())
+
+    assert list(frame.columns) == [
+        "Method",
+        "Family",
+        "Variables",
+        "Projection",
+        "Extra",
+        "Summary",
+    ]
+    assert len(frame) == 11
+    rows = {row["Method"]: row for row in frame.to_dict("records")}
+    assert rows["empirical_quantile_mapping"]["Family"] == "train + adjust"
+    assert rows["empirical_quantile_mapping"]["Variables"] == "1 (univariate)"
+    assert rows["empirical_quantile_mapping"]["Projection"] == "Yes"
+    assert rows["empirical_quantile_mapping"]["Extra"] == "Built-in"
+    assert rows["npdf_transform"]["Family"] == "adjust only"
+    assert rows["extreme_values"]["Family"] == "post-step only (post:)"
+    assert rows["mbcn"]["Variables"] == "2+ (targets:)"
+    assert rows["otc"]["Projection"] == "In-sample only"
+    assert rows["otc"]["Extra"] == "Requires POT"
+    assert rows["dotc"]["Extra"] == "Requires POT"
+    assert all(row["Summary"] for row in rows.values())
+
+
+def test_configure_methods_expander_renders_badges_with_alt(manager, config_path):
+    app = _open(_app(), config_path)
+    columns = {"Method", "Family", "Variables", "Projection", "Extra", "Summary"}
+    elements = [element for element in app.dataframe if set(element.value.columns) == columns]
+    assert len(elements) == 1
+    table = elements[0].value
+
+    assert len(table) == 11
+    assert table["Method"].tolist() == [method["name"] for method in list_methods()]
+    assert "post-step only (post:)" in table["Family"].tolist()
+    assert "2+ (targets:)" in table["Variables"].tolist()
+    assert "In-sample only" in table["Projection"].tolist()
+    assert "Requires POT" in table["Extra"].tolist()
+    assert all(element.proto.alt for element in elements)
+    caption = " ".join(item.value for item in app.caption)
+    assert "correction.<var>.post:" in caption
+    assert "targets:" in caption
+    assert "pip install POT" in caption
