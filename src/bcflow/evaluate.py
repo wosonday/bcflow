@@ -126,6 +126,7 @@ def evaluate(
     *,
     wet_thresh: float | None = None,
     period: str = "",
+    obs_paired: xr.DataArray | None = None,
 ) -> pd.DataFrame:
     """Compare raw and corrected model to observations, per station.
 
@@ -135,7 +136,8 @@ def evaluate(
     where `improved` is True if the corrected value is at least as close to
     the ideal as the raw one (None when a value is missing).
     """
-    obs_paired = obs_on_model_dates(obs, raw)  # raw and corrected share one time axis
+    if obs_paired is None:
+        obs_paired = obs_on_model_dates(obs, raw)  # raw and corrected share one time axis
     stats = _obs_stats(obs, wet_thresh)
     before = _metrics(raw, stats, obs_paired, wet_thresh)
     after = _metrics(corrected, stats, obs_paired, wet_thresh)
@@ -167,15 +169,22 @@ def evaluate(
 
 
 def paired_series(
-    obs: xr.DataArray, raw: xr.DataArray, corrected: xr.DataArray, *, period: str
+    obs: xr.DataArray,
+    raw: xr.DataArray,
+    corrected: xr.DataArray,
+    *,
+    period: str,
+    obs_paired: xr.DataArray | None = None,
 ) -> xr.Dataset:
     """obs / raw / corrected on the model's dates, with a 'period' label per day.
 
     For plotting and for users who want to recompute their own scores.
     """
+    if obs_paired is None:
+        obs_paired = obs_on_model_dates(obs, raw)
     ds = xr.Dataset(
         {
-            "obs": obs_on_model_dates(obs, raw),
+            "obs": obs_paired,
             "raw": raw.reset_coords(drop=True),
             "corrected": corrected.reset_coords(drop=True),
         }

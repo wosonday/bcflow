@@ -27,6 +27,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field, replace
 from typing import Any
 
+from .discovery import MethodMeta
+
 VARIABLES = ("precip", "tmax", "tmin", "wind", "solar", "humidity")
 
 GROUPS = ("dayofyear", "month", "none")
@@ -44,10 +46,8 @@ class VariableSpec:
     window: int = 1  # days around each day of year; only used with group="dayofyear"
     adapt_freq: bool = False
     adapt_freq_thresh: str | None = None
-    train_params: dict[str, Any] = field(default_factory=lambda: {"nquantiles": 50})
-    adjust_params: dict[str, Any] = field(
-        default_factory=lambda: {"interp": "linear", "extrapolation": "constant"}
-    )
+    train_params: dict[str, Any] = field(default_factory=dict)
+    adjust_params: dict[str, Any] = field(default_factory=dict)
     bounds: tuple[float | None, float | None] = (None, None)  # physical limits
     jitter_under_thresh: str | None = (
         None  # trace threshold for exact zeros, e.g. "0.01 mm d-1"
@@ -55,6 +55,17 @@ class VariableSpec:
     # How the model is put on a gridded reference (regrid.py); unused with stations.
     regrid: str = "bilinear"
     regrid_params: dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if self.kind not in ("+", "*"):
+            raise ValueError(
+                f"variable {self.name!r}: kind must be '+' or '*', got {self.kind!r}"
+            )
+        if self.kind == "*" and (self.bounds[0] is None or self.bounds[0] < 0.0):
+            raise ValueError(
+                f"variable {self.name!r}: kind '*' requires a non-negative lower bound, "
+                f"got {self.bounds[0]!r}"
+            )
 
 
 DEFAULTS: dict[str, VariableSpec] = {
@@ -64,7 +75,7 @@ DEFAULTS: dict[str, VariableSpec] = {
         kind="*",
         adapt_freq=True,  # fixes the "drizzle" bias: too many light-rain days
         adapt_freq_thresh="1 mm d-1",  # ETCCDI wet-day threshold
-        adjust_params={"interp": "nearest", "extrapolation": "constant"},
+        adjust_params={"interp": "nearest"},
         bounds=(0.0, None),
         jitter_under_thresh="0.01 mm d-1",
         regrid="conservative",  # keeps area totals of rain (Jones, 1999)
@@ -82,3 +93,26 @@ DEFAULTS: dict[str, VariableSpec] = {
 def resolve(name: str, overrides: dict[str, Any] | None = None) -> VariableSpec:
     """The default spec of `name`, with the given fields replaced."""
     return replace(DEFAULTS[name], **(overrides or {}))
+
+
+def resolve_method_params(
+    spec: VariableSpec,
+    meta: MethodMeta,
+    *,
+    explicit_train: dict[str, Any] | None = None,
+    explicit_adjust: dict[str, Any] | None = None,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Resolve method-owned defaults with variable-level and explicit overrides."""
+    train = {
+        **dict(meta.default_train_params),
+        **spec.train_params,
+        **(explicit_train or {}),
+    }
+    adjust = dict(meta.default_adjust_params)
+    default_spec = DEFAULTS.get(spec.name)
+    default_adjust = default_spec.adjust_params if default_spec is not None else {}
+    if meta.uses_quantiles or spec.adjust_params != default_adjust:
+        adjust.update(spec.adjust_params)
+    if explicit_adjust:
+        adjust.update(explicit_adjust)
+    return train, adjust

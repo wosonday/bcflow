@@ -24,22 +24,23 @@ variable's failure from another's -- that is pipeline.py's job.
 
 from __future__ import annotations
 
-from typing import cast
+from dataclasses import replace
+from typing import Any, cast
 
 import numpy as np
 import pandas as pd
 import pint
 import xarray as xr
-import xsdba
 from dask.base import compute
 from dask.delayed import delayed
 from xsdba.units import convert_units_to
 
+from .cell import CellPlan, adjust_trained, run_cell
 from .config_schema import PeriodsConfig, PipelineConfig
 from .coverage import check_coverage, coverage_table_from_counts, report_coverage
-from .evaluate import evaluate, paired_series, summarize
+from .discovery import get_method_meta
+from .evaluate import evaluate, obs_on_model_dates, paired_series, summarize
 from .extract import extract_nearest
-from .grouping import build_grouper
 from .loaders import (
     grid_target,
     load_grid_points,
@@ -49,14 +50,15 @@ from .loaders import (
     open_grid_reference,
     scan_grid,
 )
-from .methods import METHOD_REGISTRY
+from .methods import METHODS, check_available, get_method
+from .preprocess import SEED, ZeroHandling
 from .progress import RunControl
 from .qa import QACheck
 from .regrid import TargetGrid, model_box, regrid_to_points
 from .resources import WorkerPool, estimate_task_bytes, select_workers
 from .timeaxis import align_daily
 from .units import harmonize
-from .variables import VariableSpec
+from .variables import VariableSpec, resolve_method_params
 
 # Wet-day threshold for evaluating precipitation when the config gives none:
 # 1 mm/d, the ETCCDI convention (Zhang et al., 2011, WIREs Climate Change
@@ -65,7 +67,7 @@ _DEFAULT_WET_DAY = "1 mm d-1"
 
 # Fixed seed for the random steps (jitter of exact zeros, adapt_freq), so
 # two runs on the same data write identical files.
-_SEED = 0
+_SEED = SEED
 
 
 def run_variable(
@@ -93,8 +95,9 @@ def run_variable(
     spec = cfg.spec(variable)
     # Before loading: a typo in the method name should not cost a full data load.
     _check_method(spec, qa)
+    plan = _build_plan(cfg, spec)
     if cfg.grid is not None:
-        return _run_grid(cfg, spec, qa, control=control)
+        return _run_grid(cfg, spec, qa, control=control, plan=plan)
 
     model = cfg.model
     control.progress(variable, "loading_reference")
@@ -132,7 +135,7 @@ def run_variable(
         source_label=f"{variable}:sim",
         **grid,
     )
-    part = _correct(cfg, spec, ref, hist, sim, qa, control=control)
+    part = _correct(cfg, spec, ref, hist, sim, qa, control=control, plan=plan)
     control.progress(variable, "combining")
     result = _finish(cfg, spec, [part], qa, grid=None)
     control.check_cancelled()
@@ -145,6 +148,7 @@ def _run_grid(
     qa: list[QACheck],
     *,
     control: RunControl,
+    plan: CellPlan | None = None,
 ) -> dict:
     """Regrid in the parent, then correct CPU/RAM-budgeted batches of spatial blocks.
 
@@ -220,11 +224,14 @@ def _run_grid(
     sim_all = model_box(
         load_model_variable(model, "sim", variable, qa), target, **options
     )
+    plan = plan or _build_plan(cfg, spec)
     parts = []
     block_size = grid_cfg.block_size
     total_blocks = (target.size + block_size - 1) // block_size
-    quantiles = spec.train_params.get("nquantiles", 50)
-    quantile_count = quantiles if isinstance(quantiles, int) else len(quantiles)
+    quantiles = dict(plan.train_params).get("nquantiles", 50)
+    quantile_count = (
+        int(quantiles) if isinstance(quantiles, (int, np.integer)) else len(quantiles)
+    )
     groups = {"month": 12, "dayofyear": 366, "none": 1}[spec.group]
     completed_cells = 0
     warned_memory = False
@@ -333,13 +340,14 @@ def _run_grid(
                         compact=True,
                         control=control,
                         block_context=block_context,
+                        plan=plan,
                     )
                     batch_parts.append((part, block_qa))
                 else:
                     # Only materialized arrays go to workers, never open files or CLI callbacks.
                     tasks.append(
                         delayed(_correct_block_task)(
-                            cfg, spec, ref, hist, sim, block_qa
+                            cfg, spec, ref, hist, sim, block_qa, plan
                         )
                     )
 
@@ -362,9 +370,12 @@ def _run_grid(
             for context, (part, block_qa) in zip(contexts, batch_parts, strict=True):
                 parts.append(part)
                 qa.extend(
-                    block_qa
-                    if context["block_index"] == 1
-                    else [c for c in block_qa if c.status != "pass"]
+                    [
+                        c
+                        for c in block_qa
+                        if not c.name.startswith("bounds:")
+                        and (context["block_index"] == 1 or c.status != "pass")
+                    ]
                 )
                 completed_cells += context["block_cells"]
                 control.progress(
@@ -389,12 +400,13 @@ def _correct_block_task(
     hist: xr.DataArray,
     sim: xr.DataArray,
     block_qa: list[QACheck],
+    plan: CellPlan | None = None,
 ) -> tuple[dict, list[QACheck]]:
     """Return both results and QA; mutations in worker processes are not shared."""
-    part = _correct(cfg, spec, ref, hist, sim, block_qa, compact=True)
+    part = _correct(cfg, spec, ref, hist, sim, block_qa, compact=True, plan=plan)
     # xsdba's pickle state omits .ds; only the trained dataset is needed after
     # correction/evaluation, so use the same dataset wrapper as combined blocks.
-    part["adj"] = _CombinedAdjustment(part["adj"].ds)
+    part["adj"] = None if part["adj"] is None else _CombinedAdjustment(part["adj"].ds)
     return part, block_qa
 
 
@@ -433,6 +445,7 @@ def _correct(
     compact: bool = False,
     control: RunControl | None = None,
     block_context: dict[str, int] | None = None,
+    plan: CellPlan | None = None,
 ) -> dict:
     """Units, time axis, training, adjustment and evaluation of one set of
     points (all stations, or one block of grid cells).
@@ -446,6 +459,7 @@ def _correct(
         control = RunControl()
     context = block_context or {}
     variable = spec.name
+    plan = plan or _build_plan(cfg, spec)
     control.progress(variable, "preparing", **context)
     ref, hist, sim, units = harmonize(ref, hist, sim, spec.units, qa, name=variable)
     ref, hist, sim = align_daily(ref, hist, sim, qa, name=variable)
@@ -455,41 +469,33 @@ def _correct(
     hist_cal = _calibration_slice(hist, calibration, qa, label=f"{variable}:hist")
 
     control.progress(variable, "training", **context)
-    zeros = _ZeroHandling(spec, units)
-    ref_cal, hist_cal = zeros.jitter(ref_cal), zeros.jitter(hist_cal)
-
-    group = build_grouper(spec)
-    hist_train = hist_cal
-    if spec.adapt_freq:
-        thresh = spec.adapt_freq_thresh
-        # Unreachable after pydantic validation (PipelineConfig requires a
-        # threshold when adapt_freq is true); the check narrows `str | None`
-        # to `str` for the type checker and guards direct, unvalidated calls.
-        if thresh is None:
-            raise ValueError(
-                f"correction.{variable}: adapt_freq=true requires 'adapt_freq_thresh'."
-            )
-        # adapt_freq draws from NumPy's global generator; seed it for reproducibility.
-        np.random.seed(_SEED)
-        hist_train, _pth, _dP0 = xsdba.processing.adapt_freq(
-            ref_cal, hist_cal, thresh=thresh, group=group
-        )
-        qa.append(
-            QACheck(
-                name=f"adapt_freq:{variable}:applied",
-                status="pass",
-                message=f"Completed frequency adaptation for '{variable}' (thresh={thresh}).",
-                context={"variable": variable},
-            )
-        )
-
-    train_kwargs = {**spec.train_params, "group": group, "kind": spec.kind}
-    adj = METHOD_REGISTRY[spec.method].train(ref_cal, hist_train, **train_kwargs)
+    res = run_cell(
+        plan,
+        ref=ref_cal.to_dataset(name=variable),
+        hist=hist_cal.to_dataset(name=variable),
+        sim=sim.to_dataset(name=variable),
+        specs={variable: spec},
+        units={variable: units},
+        control=control,
+        seed=_SEED,
+        qa=qa,
+    )
     control.progress(variable, "adjustment", **context)
-    scen = _adjust(adj, sim, spec, zeros)
+    scen = res.scen[variable]
+    adj = res.trained_obj
     control.progress(variable, "evaluation", **context)
     tables, series = _evaluate_block(
-        spec, cfg.periods, adj, ref, hist, units, zeros, qa
+        spec,
+        cfg.periods,
+        plan,
+        adj,
+        res.zeros,
+        ref,
+        hist,
+        ref_cal,
+        hist_cal,
+        units,
+        qa,
     )
     if compact:
         scen = scen.astype("float32")
@@ -497,7 +503,8 @@ def _correct(
     control.check_cancelled()
     # Accessing .values for QA computes lazy arrays but does not retain them.
     scen.load()
-    adj.ds.load()
+    if adj is not None:
+        adj.ds.load()
     for s in series:
         s.load()
     control.check_cancelled()
@@ -509,6 +516,7 @@ def _correct(
         "non_finite": _non_finite(scen, sim),
         "units": units,
         "calibration": _span(ref_cal),
+        "clip_counts": res.clip_counts,
     }
 
 
@@ -535,13 +543,56 @@ def _finish(
         if len(parts) == 1
         else cast(xr.DataArray, xr.concat([p["scen"] for p in parts], dim="station"))
     )
-    adj = (
-        parts[0]["adj"]
-        if len(parts) == 1
-        else _CombinedAdjustment(
+    if parts[0]["adj"] is None:
+        adj = None
+    elif len(parts) == 1:
+        adj = parts[0]["adj"]
+    else:
+        adj = _CombinedAdjustment(
             cast(xr.Dataset, xr.concat([p["adj"].ds for p in parts], dim="station"))
         )
-    )
+
+    if grid is not None:
+        low, high = spec.bounds
+        if low is not None or high is not None:
+            n_below = sum(
+                p.get("clip_counts", {}).get(variable, (0, 0))[0] for p in parts
+            )
+            n_above = sum(
+                p.get("clip_counts", {}).get(variable, (0, 0))[1] for p in parts
+            )
+            n_total = n_below + n_above
+            clip_context = {
+                "variable": variable,
+                "bounds": [low, high],
+                "n_below": n_below,
+                "n_above": n_above,
+                "n_clipped": n_total,
+            }
+            if n_total > 0:
+                qa.append(
+                    QACheck(
+                        name=f"bounds:{variable}:clipped",
+                        status="warn",
+                        message=(
+                            f"Clipped {n_total} value(s) of '{variable}' to bounds "
+                            f"[{low}, {high}] ({n_below} below, {n_above} above)."
+                        ),
+                        context=clip_context,
+                    )
+                )
+            else:
+                qa.append(
+                    QACheck(
+                        name=f"bounds:{variable}:ok",
+                        status="pass",
+                        message=(
+                            f"All values of '{variable}' are within bounds "
+                            f"[{low}, {high}]."
+                        ),
+                        context=clip_context,
+                    )
+                )
 
     non_finite = [s for p in parts for s in p["non_finite"]]
     if non_finite:
@@ -597,44 +648,93 @@ def _finish(
 
 
 def _check_method(spec: VariableSpec, qa: list[QACheck]) -> None:
-    if spec.method not in METHOD_REGISTRY:
+    if spec.method not in METHODS:
         qa.append(
             QACheck(
                 name=f"method:{spec.name}:unknown",
                 status="fail",
-                message=f"Method '{spec.method}' is not registered. Valid methods: {sorted(METHOD_REGISTRY)}.",
+                message=f"Method '{spec.method}' is not registered. Valid methods: {sorted(METHODS)}.",
                 context={"variable": spec.name},
             )
         )
         raise ValueError(f"Invalid method for variable '{spec.name}': {spec.method!r}")
 
-
-class _ZeroHandling:
-    """Jitter exact zeros below spec.jitter_under_thresh before xsdba sees
-    the data, and set the values below it back to 0 afterwards.
-
-    The same as xsdba.processing.jitter_under_thresh, but with a seeded
-    random generator so two runs on the same data give identical files.
-    """
-
-    def __init__(self, spec: VariableSpec, units: str):
-        self.thresh = (
-            float(convert_units_to(spec.jitter_under_thresh, units))
-            if spec.jitter_under_thresh
-            else None
+    method = get_method(spec.method)
+    if method.family == "post":
+        qa.append(
+            QACheck(
+                name=f"method:{spec.name}:invalid_family",
+                status="fail",
+                message=(
+                    f"Method '{spec.method}' has family 'post' and is only valid in "
+                    "'post:' (Phase 3)."
+                ),
+                context={
+                    "variable": spec.name,
+                    "method": spec.method,
+                    "family": method.family,
+                },
+            )
         )
-        self.rng = np.random.default_rng(_SEED)
+        raise ValueError(
+            f"Method '{spec.method}' has family 'post' and cannot be used as a primary method."
+        )
 
-    def jitter(self, da: xr.DataArray) -> xr.DataArray:
-        if self.thresh is None:
-            return da
-        noise = self.rng.uniform(np.nextafter(0.0, 1.0), self.thresh, size=da.shape)
-        return da.where(~((da < self.thresh) & da.notnull()), noise)
+    if method.min_vars > 1:
+        qa.append(
+            QACheck(
+                name=f"method:{spec.name}:min_vars",
+                status="fail",
+                message=(
+                    f"Method '{spec.method}' requires at least {method.min_vars} "
+                    "variables and needs 'targets:' (Phase 4)."
+                ),
+                context={
+                    "variable": spec.name,
+                    "method": spec.method,
+                    "min_vars": method.min_vars,
+                },
+            )
+        )
+        raise ValueError(
+            f"Method '{spec.method}' requires at least {method.min_vars} variables."
+        )
 
-    def restore(self, da: xr.DataArray) -> xr.DataArray:
-        if self.thresh is None:
-            return da
-        return da.where(~(da < self.thresh), 0.0)
+    try:
+        check_available(method)
+    except ValueError as exc:
+        qa.append(
+            QACheck(
+                name=f"method:{spec.name}:unavailable",
+                status="fail",
+                message=str(exc),
+                context={
+                    "variable": spec.name,
+                    "method": spec.method,
+                    "extra": method.extra,
+                },
+            )
+        )
+        raise
+
+
+def _build_plan(cfg: PipelineConfig, spec: VariableSpec) -> CellPlan:
+    override = cfg.correction.get(spec.name)  # type: ignore[call-overload]
+    train_params, adjust_params = resolve_method_params(
+        spec,
+        get_method_meta(spec.method),
+        explicit_train=override.train_params if override else None,
+        explicit_adjust=override.adjust_params if override else None,
+    )
+    return CellPlan(
+        target_name=spec.name,
+        variables=(spec.name,),
+        method=spec.method,
+        group=spec.group,
+        window=spec.window,
+        train_params=tuple(train_params.items()),
+        adjust_params=tuple(adjust_params.items()),
+    )
 
 
 def _non_finite(scen: xr.DataArray, sim: xr.DataArray) -> list[str]:
@@ -644,20 +744,6 @@ def _non_finite(scen: xr.DataArray, sim: xr.DataArray) -> list[str]:
     bad = ~np.isfinite(scen.values) & np.isfinite(sim.transpose(*scen.dims).values)
     lost = bad.sum(axis=scen.get_axis_num("time"))
     return [str(s) for s, n in zip(scen["station"].values, lost) if n]
-
-
-def _adjust(
-    adj, da: xr.DataArray, spec: VariableSpec, zeros: _ZeroHandling
-) -> xr.DataArray:
-    out = zeros.restore(adj.adjust(zeros.jitter(da), **spec.adjust_params))
-    low, high = spec.bounds
-    if low is not None or high is not None:
-        # Quantile mapping can step outside physical limits (e.g. negative
-        # wind or humidity above 1 after extrapolation); clip them back.
-        out = out.clip(min=low, max=high, keep_attrs=True)
-    # xsdba's output dim order depends on Python's per-process string hashing
-    # (it builds dims from a set), so fix it: identical files on every run.
-    return out.transpose("time", ...)
 
 
 def _slice(da: xr.DataArray, period: tuple[str, str] | None) -> xr.DataArray:
@@ -729,11 +815,14 @@ def _evaluation_periods(
 def _evaluate_block(
     spec: VariableSpec,
     periods: PeriodsConfig,
-    adj,
-    ref,
-    hist,
+    plan: CellPlan,
+    adj: Any | None,
+    zeros: ZeroHandling | None,
+    ref: xr.DataArray,
+    hist: xr.DataArray,
+    ref_cal: xr.DataArray,
+    hist_cal: xr.DataArray,
     units: str,
-    zeros: _ZeroHandling,
     qa: list[QACheck],
 ) -> tuple[dict[str, pd.DataFrame], list[xr.Dataset]]:
     """Apply the trained correction to hist over the calibration AND the
@@ -748,21 +837,87 @@ def _evaluate_block(
     Returns ({period label: table}, [obs/raw/corrected Dataset per period]).
     """
     name = spec.name
+    method = get_method(plan.method)
     wet_thresh = _wet_threshold(spec, units)
+    specs_map = {name: spec}
+    units_map = {name: units}
+    ref_cal_ds = ref_cal.to_dataset(name=name)
+    hist_cal_ds = hist_cal.to_dataset(name=name)
     tables: dict[str, pd.DataFrame] = {}
     series: list[xr.Dataset] = []
 
     for label, period in _evaluation_periods(periods):
+        if (
+            method.family == "adjust_only"
+            and not method.supports_projection
+            and label == "validation"
+        ):
+            qa.append(
+                QACheck(
+                    name=f"evaluation:{name}:validation:skipped",
+                    status="warn",
+                    message=(
+                        f"Evaluation of the validation period skipped for '{name}': "
+                        f"method '{plan.method}' does not support out-of-sample projection."
+                    ),
+                    context={"variable": name, "period_label": label},
+                )
+            )
+            continue
         try:
             obs, raw = _slice(ref, period), _slice(hist, period)
             if obs.sizes["time"] == 0 or raw.sizes["time"] == 0:
                 where = f"{period[0]}..{period[1]}" if period else "the common period"
                 raise ValueError(f"no reference or model data in {where}")
-            corrected = _adjust(adj, raw, spec, zeros)
+            raw_ds = raw.to_dataset(name=name)
+            if method.family == "train_adjust":
+                corrected_ds = adjust_trained(
+                    plan,
+                    adj,
+                    sim=raw_ds,
+                    ref=ref_cal_ds,
+                    hist=hist_cal_ds,
+                    specs=specs_map,
+                    units=units_map,
+                    zeros=zeros,
+                )
+            elif method.supports_projection:
+                corrected_ds = run_cell(
+                    plan,
+                    ref=ref_cal_ds,
+                    hist=hist_cal_ds,
+                    sim=raw_ds,
+                    specs=specs_map,
+                    units=units_map,
+                    seed=_SEED,
+                    qa=[],
+                ).scen
+            else:
+                corrected_ds = run_cell(
+                    replace(plan, has_projection=False),
+                    ref=ref_cal_ds,
+                    hist=hist_cal_ds,
+                    sim=raw_ds,
+                    specs=specs_map,
+                    units=units_map,
+                    seed=_SEED,
+                    qa=[],
+                ).scen
+            corrected = corrected_ds[name]
+            obs_paired = obs_on_model_dates(obs, raw)
             tables[label] = evaluate(
-                obs, raw, corrected, wet_thresh=wet_thresh, period=label
+                obs,
+                raw,
+                corrected,
+                wet_thresh=wet_thresh,
+                period=label,
+                obs_paired=obs_paired,
             )
-            series.append(paired_series(obs, raw, corrected, period=label))
+            series.append(
+                paired_series(
+                    obs, raw, corrected, period=label, obs_paired=obs_paired
+                )
+            )
         except Exception as exc:  # noqa: BLE001 -- isolate evaluation from the correction itself
             qa.append(
                 QACheck(

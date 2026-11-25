@@ -9,7 +9,8 @@ import pytest
 from pydantic import ValidationError
 
 from bcflow.config_schema import VariableName, load_config
-from bcflow.variables import DEFAULTS, VARIABLES
+from bcflow.discovery import get_method_meta
+from bcflow.variables import DEFAULTS, VARIABLES, VariableSpec, resolve, resolve_method_params
 
 
 def test_valid_config_loads(toy_config):
@@ -112,3 +113,49 @@ def test_old_match_key_is_rejected(toy_config):
     bad["stations"]["match_key"] = "name"
     with pytest.raises(ValidationError):
         load_config(bad)
+
+
+def test_multiplicative_variable_requires_non_negative_lower_bound():
+    with pytest.raises(ValueError, match="non-negative lower bound"):
+        VariableSpec(name="x", units="1", kind="*", bounds=(None, None))
+    with pytest.raises(ValueError, match="non-negative lower bound"):
+        VariableSpec(name="x", units="1", kind="*", bounds=(-0.1, None))
+    with pytest.raises(ValueError, match="kind must be"):
+        VariableSpec(name="x", units="1", kind="/", bounds=(0.0, None))
+
+
+def test_resolve_method_params_parity():
+    train_qdm, adjust_qdm = resolve_method_params(
+        DEFAULTS["precip"], get_method_meta("quantile_delta_mapping")
+    )
+    assert train_qdm == {"nquantiles": 50}
+    assert adjust_qdm == {"interp": "nearest", "extrapolation": "constant"}
+
+    train_eqm, adjust_eqm = resolve_method_params(
+        DEFAULTS["tmax"], get_method_meta("empirical_quantile_mapping")
+    )
+    assert train_eqm == {"nquantiles": 50}
+    assert adjust_eqm == {"interp": "linear", "extrapolation": "constant"}
+
+    train_sc, adjust_sc = resolve_method_params(
+        DEFAULTS["precip"], get_method_meta("scaling")
+    )
+    assert train_sc == {}
+    assert adjust_sc == {}
+    assert "nquantiles" not in adjust_sc
+    assert "extrapolation" not in adjust_sc
+    assert "interp" not in adjust_sc
+
+
+def test_resolve_method_params_explicit_adjust_on_scaling_passes_through():
+    spec = resolve("precip", {"method": "scaling", "adjust_params": {"interp": "linear"}})
+    train, adjust = resolve_method_params(spec, get_method_meta("scaling"))
+    assert train == {}
+    assert adjust == {"interp": "linear"}
+
+    _, explicit_adjust = resolve_method_params(
+        DEFAULTS["precip"],
+        get_method_meta("scaling"),
+        explicit_adjust={"interp": "nearest"},
+    )
+    assert explicit_adjust == {"interp": "nearest"}
