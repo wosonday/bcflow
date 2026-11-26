@@ -4,36 +4,12 @@ from __future__ import annotations
 
 import json
 import os
-import stat
 import tempfile
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-MAX_JSON_BYTES = 8 * 1024 * 1024
-
-
-def read_bounded_bytes(path: str | Path, max_bytes: int, *, label: str) -> bytes:
-    """Read up to ``max_bytes`` from a regular file, rejecting larger or special files."""
-    target = Path(path)
-    limit_mib = max_bytes // (1024 * 1024)
-    try:
-        info = target.stat()
-        if not stat.S_ISREG(info.st_mode):
-            raise ValueError(f"{label} is not a regular file: {target}")
-        if info.st_size > max_bytes:
-            raise ValueError(
-                f"{label} exceeds the {limit_mib} MiB size limit: {target}"
-            )
-        with target.open("rb") as stream:
-            raw = stream.read(max_bytes + 1)
-    except FileNotFoundError as exc:
-        raise ValueError(f"{label} not found: {target}") from exc
-    except OSError as exc:
-        raise ValueError(f"Cannot read {label} {target}: {exc}") from exc
-    if len(raw) > max_bytes:
-        raise ValueError(f"{label} exceeds the {limit_mib} MiB size limit: {target}")
-    return raw
+from bcflow.results import MAX_JSON_BYTES, read_bounded_bytes, resolve_local_path
 
 
 def dump_json_strict(
@@ -95,12 +71,3 @@ def atomic_write_text(
         if temporary is not None:
             temporary.unlink(missing_ok=True)
     return target
-
-
-def resolve_local_path(
-    raw: str | Path, base: str | Path, *, resolve: bool = False
-) -> Path:
-    """Expand ``~`` and anchor relative paths to ``base``."""
-    path = Path(raw).expanduser()
-    combined = path if path.is_absolute() else Path(base) / path
-    return combined.resolve() if resolve else combined.absolute()
