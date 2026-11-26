@@ -2,6 +2,47 @@
 
 All notable changes to bcflow are documented here, following Keep a Changelog.
 
+## [Unreleased]
+
+### Added
+
+- Three univariate methods implemented in bcflow itself (`bcflow.native`),
+  grouped and trained like the xsdba methods, bringing the catalog to 14:
+  - `variance_scaling`: `kind="+"` corrects the group mean and standard
+    deviation; `kind="*"` scales the mean only.
+  - `parametric_quantile_mapping`: method-of-moments `dist="norm"` (default for
+    `kind="+"`) or `dist="gamma"` (default for `kind="*"`, fitted on values above
+    `thresh`; values at or below it map to zero).
+  - `power_transformation`: Leander and Buishand (2007) `a * sim ** b` for
+    precipitation (`kind="*"` only); `b` matches the wet-day coefficient of
+    variation and `a` matches the mean.
+- `MethodMeta.module`, so catalog entries can point at any module, not only
+  `xsdba.adjustment`.
+- Evaluation metrics, reported per station/cell as raw vs corrected:
+  `annual_cycle_rmse` (12 monthly climatologies), `lag1_autocorr_diff`, and
+  `ks_stat` (two-sample Kolmogorov-Smirnov distance). With a wet-day threshold,
+  the ETCCDI extremes `rx1day_bias`, `r95p_bias` (above the observed wet-day
+  95th percentile), `cdd_bias` and `cwd_bias`. Annual indices and the annual
+  cycle need at least one complete calendar year of daily data, otherwise NaN.
+- `bcflow.evaluate.change_signal()` compares the projected mean change (`+`) or
+  ratio (`*`) of the raw and corrected simulations.
+- Public module `bcflow.results` with bounded, traversal-safe readers for run
+  manifests and declared artifacts (`load_manifest`, `list_manifests`,
+  `artifact_path`, `read_qa`, `read_evaluation`, `declared_artifacts`,
+  `finite_values`, `resolve_config_paths`).
+
+### Changed
+
+- Evaluation CSVs contain additional metric rows; consumers that assume a fixed
+  set of metrics must accept the new names.
+- `extreme_values` passes `frac=0.70` and `power=3` explicitly. These equal
+  xsdba's current defaults, so results are unchanged and the FutureWarning is gone.
+- The Streamlit app reads run results through `bcflow.results` instead of its
+  own copies; `app.services` keeps re-exporting the same functions.
+- Internal: single-variable runs (`run_variable`) now use the same execution path
+  as `targets:`. QA check names, progress labels and parameter defaults are
+  unchanged.
+
 ## [0.2.0] - 2026-11-25
 
 ### Added
