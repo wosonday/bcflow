@@ -16,7 +16,7 @@ from pathlib import Path
 import yaml
 
 from app.services._io import atomic_write_text, dump_json_strict, read_bounded_bytes
-from bcflow.config_loader import _resolve_paths
+from bcflow.results import resolve_config_paths
 
 _MAX_DOCUMENT_BYTES = 2 * 1024 * 1024
 _FORMATS = {".yaml", ".yml", ".json"}
@@ -68,7 +68,7 @@ def resolve_document(text: str, format: str, base_dir: str | Path) -> dict:
             "Config document must be a mapping (key: value) at the top level."
         )
     try:
-        return _resolve_paths(raw, Path(base_dir).resolve())
+        return resolve_config_paths(raw, base_dir)
     except (RecursionError, OSError) as exc:
         raise ValueError(f"Cannot resolve config paths: {exc}") from exc
 
