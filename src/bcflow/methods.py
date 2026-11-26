@@ -3,10 +3,9 @@
 from __future__ import annotations
 
 import importlib.util
+from importlib import import_module
 from dataclasses import dataclass
 from typing import Any
-
-import xsdba.adjustment
 
 from .discovery import METHOD_CATALOG, MethodFamily, MethodMeta
 
@@ -60,7 +59,7 @@ class MethodSpec:
 
 
 METHODS: dict[str, MethodSpec] = {
-    meta.name: MethodSpec(meta=meta, cls=getattr(xsdba.adjustment, meta.class_name))
+    meta.name: MethodSpec(meta=meta, cls=getattr(import_module(meta.module), meta.class_name))
     for meta in METHOD_CATALOG
 }
 
