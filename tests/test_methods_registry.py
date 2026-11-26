@@ -3,10 +3,9 @@
 from __future__ import annotations
 
 import importlib.util
+from importlib import import_module
 
 import pytest
-import xsdba.adjustment
-
 from bcflow.discovery import METHOD_CATALOG
 from bcflow.methods import (
     METHOD_REGISTRY,
@@ -17,15 +16,15 @@ from bcflow.methods import (
 )
 
 
-def test_all_catalog_methods_resolve_to_xsdba_classes():
-    assert len(METHODS) == 11
+def test_all_catalog_methods_resolve_to_catalog_classes():
+    assert len(METHODS) == 14
     assert list(METHODS) == [m.name for m in METHOD_CATALOG]
     assert list(METHOD_REGISTRY) == [m.name for m in METHOD_CATALOG]
 
     for meta in METHOD_CATALOG:
         spec = get_method(meta.name)
         assert isinstance(spec, MethodSpec)
-        expected_cls = getattr(xsdba.adjustment, meta.class_name)
+        expected_cls = getattr(import_module(meta.module), meta.class_name)
         assert spec.cls is expected_cls
         assert METHOD_REGISTRY[meta.name] is expected_cls
         assert spec.meta is meta
@@ -57,16 +56,23 @@ def test_quantile_vs_non_quantile_defaults():
     for name in (
         "scaling",
         "loci",
-        "extreme_values",
         "principal_components",
         "mbcn",
         "npdf_transform",
         "otc",
         "dotc",
+        "variance_scaling",
+        "parametric_quantile_mapping",
+        "power_transformation",
     ):
         spec = get_method(name)
         assert dict(spec.default_train_params) == {}
         assert dict(spec.default_adjust_params) == {}
+
+    assert dict(get_method("extreme_values").default_adjust_params) == {
+        "frac": 0.70,
+        "power": 3,
+    }
 
 
 def test_get_method_unknown_raises_value_error():

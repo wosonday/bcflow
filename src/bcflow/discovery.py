@@ -10,7 +10,7 @@ MethodFamily = Literal["train_adjust", "adjust_only", "post"]
 
 @dataclass(frozen=True)
 class MethodMeta:
-    """Static metadata describing a registered xsdba adjustment method."""
+    """Static metadata describing a registered adjustment method."""
 
     name: str
     class_name: str
@@ -26,6 +26,7 @@ class MethodMeta:
     registry_defaults: tuple[str, ...] = ()
     default_train_params: tuple[tuple[str, Any], ...] = ()
     default_adjust_params: tuple[tuple[str, Any], ...] = ()
+    module: str = "xsdba.adjustment"
 
 
 # Keep summaries equal to the first lines of the corresponding xsdba docstrings;
@@ -124,7 +125,35 @@ METHOD_CATALOG: tuple[MethodMeta, ...] = (
         # ExtremeValues._train requires `cluster_thresh` (supplied via registry_defaults);
         # ExtremeValues._adjust defaults interp="linear", extrapolation="constant".
         default_train_params=(),
-        default_adjust_params=(),
+        default_adjust_params=(("frac", 0.70), ("power", 3)),
+    ),
+    MethodMeta(
+        name="variance_scaling",
+        class_name="VarianceScaling",
+        summary="Variance Scaling bias-adjustment.",
+        family="train_adjust",
+        min_vars=1,
+        registry_defaults=("kind",),
+        module="bcflow.native",
+    ),
+    MethodMeta(
+        name="parametric_quantile_mapping",
+        class_name="ParametricQuantileMapping",
+        summary="Parametric Quantile Mapping bias-adjustment.",
+        family="train_adjust",
+        min_vars=1,
+        uses_quantiles=True,
+        registry_defaults=("kind",),
+        module="bcflow.native",
+    ),
+    MethodMeta(
+        name="power_transformation",
+        class_name="PowerTransformation",
+        summary="Power Transformation bias-adjustment.",
+        family="train_adjust",
+        min_vars=1,
+        registry_defaults=("kind",),
+        module="bcflow.native",
     ),
     MethodMeta(
         name="principal_components",

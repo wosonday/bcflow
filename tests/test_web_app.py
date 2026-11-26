@@ -527,7 +527,7 @@ def test_methods_table_frame_surfaces_family_variables_projection_and_extras():
         "Extra",
         "Summary",
     ]
-    assert len(frame) == 11
+    assert len(frame) == 14
     rows = {row["Method"]: row for row in frame.to_dict("records")}
     assert rows["empirical_quantile_mapping"]["Family"] == "train + adjust"
     assert rows["empirical_quantile_mapping"]["Variables"] == "1 (univariate)"
@@ -551,7 +551,7 @@ def test_configure_methods_expander_renders_badges_with_alt(manager, config_path
     assert len(elements) == 1
     table = elements[0].value
 
-    assert len(table) == 11
+    assert len(table) == 14
     assert table["Method"].tolist() == [method["name"] for method in list_methods()]
     assert "post-step only (post:)" in table["Family"].tolist()
     assert "2+ (targets:)" in table["Variables"].tolist()
