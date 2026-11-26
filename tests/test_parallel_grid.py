@@ -212,21 +212,24 @@ def mock_grid(monkeypatch):
     monkeypatch.setattr(adjust, "regrid_to_points", points)
     corrected = []
 
-    def correct(cfg, spec, ref, hist, sim, qa, **kwargs):
+    def correct(cfg, target_cfg, specs, ref_by_var, hist_by_var, sim_by_var, qa, **kwargs):
         assert kwargs["compact"] is True
+        ref = ref_by_var["tmax"]
+        hist = hist_by_var["tmax"]
+        sim = sim_by_var["tmax"]
         xr.testing.assert_identical(ref, hist)
         xr.testing.assert_identical(ref, sim)
         ids = ref.station.values.tolist()
         corrected.append(ids)
         return {"ids": ids, "adj": SimpleNamespace(ds=xr.Dataset())}
 
-    monkeypatch.setattr(adjust, "_correct", correct)
+    monkeypatch.setattr(adjust, "_correct_block", correct)
     finish = Mock(
-        side_effect=lambda cfg, spec, parts, qa, **kw: {
-            "parts": [p["ids"] for p in parts]
+        side_effect=lambda cfg, target_cfg, specs, parts, qa, **kw: {
+            "tmax": {"parts": [p["ids"] for p in parts]}
         }
     )
-    monkeypatch.setattr(adjust, "_finish", finish)
+    monkeypatch.setattr(adjust, "_finish_target", finish)
     return raw, target, corrected, finish
 
 

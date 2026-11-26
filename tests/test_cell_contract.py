@@ -1218,13 +1218,13 @@ def test_run_target_multivariate_grid_parallel_matches_sequential_and_ipc_safe(
         pd.testing.assert_frame_equal(seq[v]["evaluation"], par[v]["evaluation"])
         xr.testing.assert_allclose(seq[v]["hist_eval"], par[v]["hist_eval"])
 
-    # Verify _correct_target_block_task strips live TrainAdjust/ZeroHandling/post_trained.
+    # Verify _correct_block_task strips live TrainAdjust/ZeroHandling/post_trained.
     ds = _make_dataset(years=1, start="2000-01-01", seed=141)
     cfg = load_config(raw)
     target = cfg.resolved_targets()[0]
     specs = {v: cfg.spec(v) for v in target.variables}
     plan = adjust._build_target_plan(target, specs)
-    part, _ = adjust._correct_target_block_task(
+    part, _ = adjust._correct_block_task(
         cfg,
         target,
         specs,

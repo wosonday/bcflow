@@ -108,29 +108,22 @@ def run_variable(
     An optional control receives stage progress and cooperatively cancels
     at stage boundaries (and after each reference scan chunk).
     """
-    if control is None:
-        control = RunControl()
-    control.check_cancelled()
+    if control is not None:
+        control.check_cancelled()
     spec = cfg.spec(variable)
     override = cfg.correction.get(spec.name)
-    # Before loading: a typo in the method name should not cost a full data load.
-    _validate_primary_method(
-        spec.name,
-        spec.method,
-        qa,
-        is_target=False,
-        variables=(spec.name,),
-        post=override.post if override is not None else (),
+    target = TargetConfig.model_construct(
+        name=variable,
+        variables=[variable],
+        method=spec.method,
+        group=spec.group,
+        window=spec.window,
+        pool_dims=list(override.pool_dims) if override else [],
+        train_params=dict(override.train_params or {}) if override else {},
+        adjust_params=dict(override.adjust_params or {}) if override else {},
+        post=list(override.post) if override else [],
     )
-    plan = _build_plan(cfg, spec)
-    if cfg.grid is not None:
-        return cast(
-            dict,
-            _run_grid(
-                cfg, [spec.name], {spec.name: spec}, qa, control=control, plan=plan
-            ),
-        )
-    return _run_station(cfg, spec, qa, control=control, plan=plan)
+    return _run_target(cfg, target, qa, control=control, legacy=True)[variable]
 
 
 def run_target(
@@ -145,49 +138,42 @@ def run_target(
     Returns ``{variable: result_dict}`` for every variable in ``target.variables``,
     matching the structure returned by ``run_variable()``.
     """
+    return _run_target(cfg, target, qa, control=control, legacy=False)
+
+
+def _run_target(
+    cfg: PipelineConfig,
+    target: TargetConfig,
+    qa: list[QACheck],
+    *,
+    control: RunControl | None,
+    legacy: bool,
+) -> dict[str, dict]:
     if control is None:
         control = RunControl()
     control.check_cancelled()
-    method = _validate_primary_method(
+    _validate_primary_method(
         target.name,
         target.method,
         qa,
-        is_target=True,
+        is_target=not legacy,
         variables=target.variables,
         group=target.group,
         post=target.post,
     )
-
-    if len(target.variables) == 1 and method.min_vars == 1:
-        v = target.variables[0]
-        spec = replace(
-            cfg.spec(v), method=target.method, group=target.group, window=target.window
-        )
-        plan = _build_target_plan(target, {v: spec})
-        if cfg.grid is not None:
-            return {
-                v: cast(
-                    dict, _run_grid(cfg, [v], {v: spec}, qa, control=control, plan=plan)
-                )
-            }
-        return {v: _run_station(cfg, spec, qa, control=control, plan=plan)}
-
-    specs = {v: cfg.spec(v) for v in target.variables}
+    specs = {
+        v: replace(cfg.spec(v), method=target.method, group=target.group, window=target.window)
+        if len(target.variables) == 1 else cfg.spec(v)
+        for v in target.variables
+    }
     plan = _build_target_plan(target, specs)
     if cfg.grid is not None:
-        return cast(
-            dict[str, dict],
-            _run_grid(
-                cfg,
-                list(target.variables),
-                specs,
-                qa,
-                control=control,
-                plan=plan,
-                target_cfg=target,
-            ),
-        )
-    return _run_target_station(cfg, target, specs, qa, control=control, plan=plan)
+        return _run_grid(cfg, target, specs, qa, control=control, plan=plan)
+    return _run_station(cfg, target, specs, qa, control=control, plan=plan)
+
+
+def _execution_label(target: TargetConfig) -> str:
+    return target.variables[0] if len(target.variables) == 1 else target.name
 
 
 def _load_station_series(
@@ -227,23 +213,6 @@ def _load_station_series(
 
 def _run_station(
     cfg: PipelineConfig,
-    spec: VariableSpec,
-    qa: list[QACheck],
-    *,
-    control: RunControl,
-    plan: CellPlan,
-) -> dict:
-    """Run univariate bias correction on station observations."""
-    ref, hist, sim = _load_station_series(cfg, spec, qa, control=control)
-    part = _correct(cfg, spec, ref, hist, sim, qa, control=control, plan=plan)
-    control.progress(spec.name, "combining")
-    result = _finish(cfg, spec, [part], qa, grid=None)
-    control.check_cancelled()
-    return result
-
-
-def _run_target_station(
-    cfg: PipelineConfig,
     target: TargetConfig,
     specs: dict[str, VariableSpec],
     qa: list[QACheck],
@@ -251,7 +220,7 @@ def _run_target_station(
     control: RunControl,
     plan: CellPlan,
 ) -> dict[str, dict]:
-    """Run a multivariate target on station observations."""
+    """Load and correct all station series for one target."""
     ref_by_var: dict[str, xr.DataArray] = {}
     hist_by_var: dict[str, xr.DataArray] = {}
     sim_by_var: dict[str, xr.DataArray] = {}
@@ -260,27 +229,20 @@ def _run_target_station(
             cfg, specs[v], qa, control=control
         )
 
-    ref_by_var, hist_by_var, sim_by_var, units = _harmonize_and_align(
-        list(target.variables), specs, ref_by_var, hist_by_var, sim_by_var, qa
-    )
-    ref_by_var, hist_by_var, sim_by_var = _intersect_target_station_data(
-        target.name, list(target.variables), ref_by_var, hist_by_var, sim_by_var, qa
-    )
-    part = _run_cell_and_evaluate(
+    part = _correct_block(
         cfg,
-        target.name,
-        list(target.variables),
+        target,
         specs,
         ref_by_var,
         hist_by_var,
         sim_by_var,
-        units,
         qa,
         compact=False,
         control=control,
         plan=plan,
+        preparing=len(target.variables) == 1,
     )
-    control.progress(target.name, "combining")
+    control.progress(_execution_label(target), "combining")
     results = _finish_target(cfg, target, specs, [part], qa, grid=None)
     control.check_cancelled()
     return results
@@ -288,14 +250,13 @@ def _run_target_station(
 
 def _run_grid(
     cfg: PipelineConfig,
-    variables: list[str],
+    target_cfg: TargetConfig,
     specs: dict[str, VariableSpec],
     qa: list[QACheck],
     *,
     control: RunControl,
     plan: CellPlan,
-    target_cfg: TargetConfig | None = None,
-) -> dict | dict[str, dict]:
+) -> dict[str, dict]:
     """Regrid in the parent, then correct CPU/RAM-budgeted batches of spatial blocks.
 
     Workers keep full time series. Completed results accumulate in the parent;
@@ -304,8 +265,9 @@ def _run_grid(
     """
     grid_cfg, model = cfg.grid, cfg.model
     assert grid_cfg is not None  # narrowed for the type checker; checked by the caller
-    label = target_cfg.name if target_cfg is not None else variables[0]
-    group = target_cfg.group if target_cfg is not None else specs[variables[0]].group
+    variables = list(target_cfg.variables)
+    label = _execution_label(target_cfg)
+    group = target_cfg.group
 
     references: dict[str, xr.DataArray] = {}
     lats: dict[str, Any] = {}
@@ -369,7 +331,7 @@ def _run_grid(
     )
     target_grid = grid_target(references[v0], lats[v0], lons[v0], has_data)
     if target_grid.size == 0:
-        if target_cfg is not None:
+        if len(variables) > 1:
             _fail_qa(
                 qa,
                 f"grid:{label}:ref:empty",
@@ -448,7 +410,7 @@ def _run_grid(
     completed_cells = 0
     warned_memory = False
     start = 0
-    ctx_key = "target" if target_cfg is not None else "variable"
+    ctx_key = "variable" if len(variables) == 1 else "target"
 
     with WorkerPool() as pool:
         while start < target_grid.size:
@@ -544,36 +506,8 @@ def _run_grid(
                         spec,
                     )
                 contexts.append(block_context)
-                if target_cfg is None:
-                    if selection.workers == 1:
-                        part = _correct(
-                            cfg,
-                            specs[v0],
-                            ref_block[v0],
-                            hist_block[v0],
-                            sim_block[v0],
-                            block_qa,
-                            compact=True,
-                            control=control,
-                            block_context=block_context,
-                            plan=plan,
-                        )
-                        batch_parts.append((part, block_qa))
-                    else:
-                        # Only materialized arrays go to workers, never open files or CLI callbacks.
-                        tasks.append(
-                            delayed(_correct_block_task)(
-                                cfg,
-                                specs[v0],
-                                ref_block[v0],
-                                hist_block[v0],
-                                sim_block[v0],
-                                block_qa,
-                                plan,
-                            )
-                        )
-                elif selection.workers == 1:
-                    part = _correct_target_block(
+                if selection.workers == 1:
+                    part = _correct_block(
                         cfg,
                         target_cfg,
                         specs,
@@ -589,7 +523,7 @@ def _run_grid(
                     batch_parts.append((part, block_qa))
                 else:
                     tasks.append(
-                        delayed(_correct_target_block_task)(
+                        delayed(_correct_block_task)(
                             cfg,
                             target_cfg,
                             specs,
@@ -637,12 +571,7 @@ def _run_grid(
             start = batch_stop
 
     control.progress(label, "combining")
-    if target_cfg is None:
-        result: dict | dict[str, dict] = _finish(
-            cfg, specs[v0], parts, qa, grid=target_grid
-        )
-    else:
-        result = _finish_target(cfg, target_cfg, specs, parts, qa, grid=target_grid)
+    result = _finish_target(cfg, target_cfg, specs, parts, qa, grid=target_grid)
     control.check_cancelled()
     return result
 
@@ -655,20 +584,6 @@ def _strip_adj_for_ipc(part: dict) -> dict:
 
 def _correct_block_task(
     cfg: PipelineConfig,
-    spec: VariableSpec,
-    ref: xr.DataArray,
-    hist: xr.DataArray,
-    sim: xr.DataArray,
-    block_qa: list[QACheck],
-    plan: CellPlan,
-) -> tuple[dict, list[QACheck]]:
-    """Return both results and QA; mutations in worker processes are not shared."""
-    part = _correct(cfg, spec, ref, hist, sim, block_qa, compact=True, plan=plan)
-    return _strip_adj_for_ipc(part), block_qa
-
-
-def _correct_target_block_task(
-    cfg: PipelineConfig,
     target: TargetConfig,
     specs: dict[str, VariableSpec],
     ref_by_var: dict[str, xr.DataArray],
@@ -677,8 +592,8 @@ def _correct_target_block_task(
     block_qa: list[QACheck],
     plan: CellPlan,
 ) -> tuple[dict, list[QACheck]]:
-    """Run one multivariate block in a worker process; return only pickle-safe state."""
-    part = _correct_target_block(
+    """Run one block in a worker process; return only pickle-safe state."""
+    part = _correct_block(
         cfg,
         target,
         specs,
@@ -864,62 +779,7 @@ def _run_cell_and_evaluate(
     )
 
 
-def _correct(
-    cfg: PipelineConfig,
-    spec: VariableSpec,
-    ref: xr.DataArray,
-    hist: xr.DataArray,
-    sim: xr.DataArray,
-    qa: list[QACheck],
-    *,
-    plan: CellPlan,
-    compact: bool = False,
-    control: RunControl | None = None,
-    block_context: dict[str, int] | None = None,
-) -> dict:
-    """Units, time axis, training, adjustment and evaluation of one set of
-    points (all stations, or one block of grid cells).
-
-    With compact=True the results are kept as float32, halving memory for
-    large grids. Outputs are materialized before returning, so a caller
-    can truthfully report block completion even when xsdba returns lazy data.
-    Progress stages include block_context when supplied.
-    """
-    if control is None:
-        control = RunControl()
-    v = spec.name
-    control.progress(v, "preparing", **(block_context or {}))
-    aligned_ref, aligned_hist, aligned_sim, units = _harmonize_and_align(
-        [v], {v: spec}, {v: ref}, {v: hist}, {v: sim}, qa
-    )
-    part = _run_cell_and_evaluate(
-        cfg,
-        v,
-        [v],
-        {v: spec},
-        aligned_ref,
-        aligned_hist,
-        aligned_sim,
-        units,
-        qa,
-        compact=compact,
-        control=control,
-        block_context=block_context,
-        plan=plan,
-    )
-    return {
-        "scen": part["scen"][v],
-        "adj": part["adj"],
-        "tables": part["tables"][v],
-        "series": part["series"][v],
-        "non_finite": part["non_finite"][v],
-        "units": part["units"][v],
-        "calibration": part["calibration"],
-        "clip_counts": part["clip_counts"],
-    }
-
-
-def _correct_target_block(
+def _correct_block(
     cfg: PipelineConfig,
     target: TargetConfig,
     specs: dict[str, VariableSpec],
@@ -932,12 +792,14 @@ def _correct_target_block(
     compact: bool = False,
     control: RunControl | None = None,
     block_context: dict[str, int] | None = None,
+    preparing: bool = True,
 ) -> dict:
-    """Harmonize units, align daily time axes across variables, run_cell, and evaluate."""
+    """Harmonize, align, run the cell contract, and evaluate one station/block set."""
     if control is None:
         control = RunControl()
     variables = list(target.variables)
-    control.progress(target.name, "preparing", **(block_context or {}))
+    if preparing:
+        control.progress(_execution_label(target), "preparing", **(block_context or {}))
     aligned_ref, aligned_hist, aligned_sim, units = _harmonize_and_align(
         variables, specs, ref_by_var, hist_by_var, sim_by_var, qa
     )
@@ -947,7 +809,7 @@ def _correct_target_block(
         )
     return _run_cell_and_evaluate(
         cfg,
-        target.name,
+        _execution_label(target),
         variables,
         specs,
         aligned_ref,
@@ -1069,12 +931,11 @@ def _finish_variable(
     group: str,
     window: int,
     target_name: str | None = None,
-    per_var: bool = False,
 ) -> dict:
     """Combine one variable's blocks and emit bounds, non-finite, done, and evaluation QA."""
     variable = spec.name
     unit = "cell" if grid is not None else "station"
-    scen_pieces = [p["scen"][variable] if per_var else p["scen"] for p in parts]
+    scen_pieces = [p["scen"][variable] for p in parts]
     scen = (
         scen_pieces[0]
         if len(scen_pieces) == 1
@@ -1089,7 +950,7 @@ def _finish_variable(
     non_finite = [
         s
         for p in parts
-        for s in (p["non_finite"][variable] if per_var else p["non_finite"])
+        for s in p["non_finite"][variable]
     ]
     _emit_non_finite_qa(variable, non_finite, unit, qa)
 
@@ -1124,14 +985,10 @@ def _finish_variable(
         )
     )
 
-    var_parts = (
-        [
-            {"tables": p["tables"][variable], "series": p["series"][variable]}
-            for p in parts
-        ]
-        if per_var
-        else parts
-    )
+    var_parts = [
+        {"tables": p["tables"][variable], "series": p["series"][variable]}
+        for p in parts
+    ]
     evaluation, hist_eval = _summarize_evaluation(
         spec, cfg.periods, var_parts, qa, unit=unit
     )
@@ -1144,29 +1001,6 @@ def _finish_variable(
     }
 
 
-def _finish(
-    cfg: PipelineConfig,
-    spec: VariableSpec,
-    parts: list[dict],
-    qa: list[QACheck],
-    *,
-    grid: TargetGrid | None,
-) -> dict:
-    """Put the blocks back together and write the summary checks once."""
-    return _finish_variable(
-        cfg,
-        spec,
-        parts,
-        qa,
-        adj=_concat_adj(parts),
-        grid=grid,
-        method=spec.method,
-        group=spec.group,
-        window=spec.window,
-        per_var=False,
-    )
-
-
 def _finish_target(
     cfg: PipelineConfig,
     target: TargetConfig,
@@ -1176,7 +1010,7 @@ def _finish_target(
     *,
     grid: TargetGrid | None,
 ) -> dict[str, dict]:
-    """Concatenate multivariate blocks and return one result dict per variable."""
+    """Concatenate blocks and return one result dict per variable."""
     adj = _concat_adj(parts)
     return {
         v: _finish_variable(
@@ -1189,8 +1023,7 @@ def _finish_target(
             method=target.method,
             group=target.group,
             window=target.window,
-            target_name=target.name,
-            per_var=True,
+            target_name=None if len(target.variables) == 1 else target.name,
         )
         for v in target.variables
     }
@@ -1363,27 +1196,6 @@ def _build_post_steps(post: list[PostConfig]) -> tuple[PostStep, ...]:
             adjust_params=tuple(p.adjust_params.items()),
         )
         for p in post
-    )
-
-
-def _build_plan(cfg: PipelineConfig, spec: VariableSpec) -> CellPlan:
-    override = cfg.correction.get(spec.name)
-    train_params, adjust_params = resolve_method_params(
-        spec,
-        get_method_meta(spec.method),
-        explicit_train=override.train_params if override else None,
-        explicit_adjust=override.adjust_params if override else None,
-    )
-    return CellPlan(
-        target_name=spec.name,
-        variables=(spec.name,),
-        method=spec.method,
-        group=spec.group,
-        window=spec.window,
-        pool_dims=tuple(override.pool_dims) if override else (),
-        train_params=tuple(train_params.items()),
-        adjust_params=tuple(adjust_params.items()),
-        post=_build_post_steps(override.post) if override else (),
     )
 
 
